@@ -1,0 +1,791 @@
+#!/usr/bin/env node
+//
+// claude-code MCP server.
+//
+// A tiny, zero-dependency MCP stdio server that lets Codex consult Claude Code.
+// It speaks newline-delimited JSON-RPC 2.0 on stdin/stdout (the MCP stdio
+// transport). stdout carries ONLY protocol messages; all logging goes to stderr.
+//
+// `node claude-mcp-server.mjs`              → run the MCP stdio server.
+// `node claude-mcp-server.mjs worker --job-id <id>` → run one background job.
+//
+import process from "node:process";
+import path from "node:path";
+import fs from "node:fs";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+import { runClaude } from "./lib/claude-runner.mjs";
+import { getLastSession, setLastSession } from "./lib/session-store.mjs";
+import { checkClaudeReadiness, renderReadiness } from "./lib/claude-status.mjs";
+import { openProgressLog, progressLogPath } from "./lib/progress-log.mjs";
+import { generateJobId, listJobs, nowIso, pruneJobs, readJob, updateJob, writeJob } from "./lib/jobs.mjs";
+import { terminateProcessTree } from "./lib/process.mjs";
+import { runVerify, renderVerify } from "./lib/verify.mjs";
+
+const SERVER_NAME = "claude-code";
+const SERVER_VERSION = "0.8.0";
+// Versions this server actually implements. If the client asks for something
+// else, answer with the latest one we support (per the MCP spec) instead of
+// echoing an arbitrary string back.
+const SUPPORTED_PROTOCOL_VERSIONS = new Set(["2024-11-05", "2025-03-26", "2025-06-18"]);
+const LATEST_PROTOCOL_VERSION = "2025-06-18";
+const PLUGIN_ROOT = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
+const SELF_PATH = fileURLToPath(import.meta.url);
+
+// Stability guards. The env overrides exist for tests (and unusual setups);
+// normal installs should rely on the defaults.
+const MAX_CONCURRENT_JOBS = 4;
+const WORKER_MAX_RUNTIME_MS =
+  Number(process.env.CC_PLUGIN_CODEX_WORKER_TIMEOUT_MS) > 0
+    ? Number(process.env.CC_PLUGIN_CODEX_WORKER_TIMEOUT_MS)
+    : 45 * 60 * 1000;
+// Foreground cap: a bit under Codex's 1800s tool_timeout_sec (.mcp.json), so
+// the caller gets a real error (and the claude process is reaped) instead of
+// the client giving up while claude keeps burning tokens server-side.
+const FOREGROUND_MAX_RUNTIME_MS =
+  Number(process.env.CC_PLUGIN_CODEX_FG_TIMEOUT_MS) > 0
+    ? Number(process.env.CC_PLUGIN_CODEX_FG_TIMEOUT_MS)
+    : 28 * 60 * 1000;
+
+// Live foreground consults by JSON-RPC request id, so notifications/cancelled
+// and session shutdown can terminate them — a foreground claude must never
+// outlive the request that started it.
+const activeForegroundRuns = new Map();
+
+function log(message) {
+  process.stderr.write(`[claude-code-mcp] ${message}\n`);
+}
+
+function send(message) {
+  process.stdout.write(`${JSON.stringify(message)}\n`);
+}
+
+function reply(id, result) {
+  send({ jsonrpc: "2.0", id, result });
+}
+
+function replyError(id, code, message) {
+  send({ jsonrpc: "2.0", id, error: { code, message } });
+}
+
+const CONSULT_TOOL = {
+  name: "consult",
+  description:
+    "Consult Claude Code on a task in this repository. Claude runs in the given directory using the user's existing Claude login and reports back a gentle, thorough second opinion. By default it only investigates and advises (no file edits); set edit=true to let it make changes. Claude also has access to the user's installed Claude Code skills (e.g. `frontend-design` for UI work) — name a skill in your prompt to have Claude use it, and pair it with edit=true for skills that generate code. For long tasks set background=true to return immediately with a job id, then poll consult_status / consult_result. Infer edit/background/verify from the user's intent (edit when they want changes made; background for anything beyond a quick task; verify=\"auto\" for edit tasks) instead of asking them to specify flags. Always pass the absolute path of the repo you are working in as `cwd`.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      prompt: {
+        type: "string",
+        description: "What you'd like Claude to look at, investigate, or do. Be specific about the goal."
+      },
+      cwd: {
+        type: "string",
+        description:
+          "Absolute path to the repository/directory Claude should work in (the directory you are currently working in). Required — it cannot be inferred."
+      },
+      edit: {
+        type: "boolean",
+        description: "Allow Claude to modify files. Default false (advisory / read-only)."
+      },
+      resume: {
+        type: "boolean",
+        description: "Continue the most recent Claude session for this directory instead of starting fresh. Default false."
+      },
+      model: {
+        type: "string",
+        description: "Optional Claude model override, e.g. claude-sonnet-4-6."
+      },
+      background: {
+        type: "boolean",
+        description:
+          "Run as a background job and return a job id immediately instead of blocking. Recommended for long tasks (large redesigns, multi-file work). Poll with consult_status and fetch with consult_result."
+      },
+      verify: {
+        type: "string",
+        description:
+          "Optional command the SERVER runs (no approval gate) after Claude's edits, to verify them. Use \"auto\" to let the server pick a syntax check for whatever files Claude touched (recommended for edit tasks), or give a command like 'npm test' or 'python3 -m py_compile {files}' ({files} expands to the touched files). Its exit code and output are appended to the result. Note: explicit commands are subject to a safety policy (plain invocations of common build/test tools; no shell operators) — if a command is blocked, prefer \"auto\"."
+      }
+    },
+    required: ["prompt", "cwd"],
+    additionalProperties: false
+  }
+};
+
+const SETUP_TOOL = {
+  name: "setup",
+  description:
+    "Check that Claude Code is installed and signed in so the consult tool will work. Reports readiness (node, claude version, login) and any next steps to fix it. Pass deep=true to verify the login with a quick live call.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      deep: {
+        type: "boolean",
+        description: "Verify the Claude login with a tiny live `claude -p` call (costs a small amount). Default false."
+      }
+    },
+    additionalProperties: false
+  }
+};
+
+const STATUS_TOOL = {
+  name: "consult_status",
+  description:
+    "Check a background consult job: status (running/done/error/cancelled/timed_out), elapsed time, and recent activity from its live log. Omit job_id for the most recent job.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      job_id: { type: "string", description: "Job id from consult(background=true). Omit for the most recent job." }
+    },
+    additionalProperties: false
+  }
+};
+
+const RESULT_TOOL = {
+  name: "consult_result",
+  description:
+    "Get the final result of a completed background consult job. Omit job_id for the most recent job. If it's still running, it tells you so.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      job_id: { type: "string", description: "Job id from consult(background=true). Omit for the most recent job." }
+    },
+    additionalProperties: false
+  }
+};
+
+const CANCEL_TOOL = {
+  name: "consult_cancel",
+  description:
+    "Cancel a running background consult job (terminates the Claude process so it stops consuming usage). Omit job_id for the most recent job.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      job_id: { type: "string", description: "Job id from consult(background=true). Omit for the most recent job." }
+    },
+    additionalProperties: false
+  }
+};
+
+const TOOLS = [CONSULT_TOOL, SETUP_TOOL, STATUS_TOOL, RESULT_TOOL, CANCEL_TOOL];
+
+function resolveTaskCwd(rawCwd) {
+  if (typeof rawCwd === "string" && rawCwd.trim()) {
+    const resolved = path.resolve(rawCwd.trim());
+    try {
+      if (fs.statSync(resolved).isDirectory()) {
+        return { cwd: resolved, error: null };
+      }
+    } catch {
+      // fall through to the error below
+    }
+    return { cwd: null, error: `The path \`${rawCwd}\` is not an existing directory.` };
+  }
+  return { cwd: null, error: "Please pass `cwd`: the absolute path of the directory Claude should work in." };
+}
+
+function renderResult(run, { taskCwd, edit, usedResume }) {
+  const lines = [];
+  const verb = edit ? "made changes in" : "advised on";
+  const session = run.sessionId ? ` (session ${run.sessionId})` : "";
+  lines.push(`🤝 Claude Code ${verb} ${taskCwd}${session}.`);
+  if (usedResume) {
+    lines.push("Continued the previous Claude session for this directory.");
+  }
+  lines.push("");
+  lines.push(run.result?.trim() || "(Claude returned no text.)");
+
+  if (run.touchedFiles?.length) {
+    lines.push("");
+    lines.push("Files Claude touched:");
+    for (const file of run.touchedFiles) {
+      lines.push(`- ${file}`);
+    }
+  } else if (edit) {
+    lines.push("");
+    lines.push("Claude did not modify any files.");
+  }
+
+  const meta = [];
+  if (run.numTurns != null) {
+    meta.push(`${run.numTurns} turn${run.numTurns === 1 ? "" : "s"}`);
+  }
+  if (typeof run.costUsd === "number") {
+    meta.push(`$${run.costUsd.toFixed(4)}`);
+  }
+  if (meta.length) {
+    lines.push("");
+    lines.push(`( ${meta.join(" · ")} )`);
+  }
+  return lines.join("\n");
+}
+
+function parseConsultArgs(args) {
+  const prompt = typeof args?.prompt === "string" ? args.prompt.trim() : "";
+  if (!prompt) {
+    return { error: "Please provide a `prompt` describing what to ask Claude." };
+  }
+  const { cwd: taskCwd, error: cwdError } = resolveTaskCwd(args?.cwd);
+  if (cwdError) {
+    return { error: cwdError };
+  }
+  const edit = Boolean(args?.edit);
+  const model = typeof args?.model === "string" && args.model.trim() ? args.model.trim() : null;
+  const resumeId = args?.resume ? getLastSession(taskCwd) : null;
+  const verify = typeof args?.verify === "string" && args.verify.trim() ? args.verify.trim() : null;
+  return { prompt, taskCwd, edit, model, resumeId, verify };
+}
+
+function launchBackgroundConsult({ prompt, taskCwd, edit, model, resumeId, verify }) {
+  const running = listJobs().filter((job) => job.status === "running").length;
+  if (running >= MAX_CONCURRENT_JOBS) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Too many background consults already running (${running}/${MAX_CONCURRENT_JOBS}). Wait for one to finish, or cancel one with consult_cancel.`
+        }
+      ],
+      isError: true
+    };
+  }
+
+  const jobId = generateJobId();
+  const logFile = progressLogPath(jobId);
+  writeJob({
+    id: jobId,
+    status: "running",
+    cwd: taskCwd,
+    prompt,
+    edit,
+    resumeId,
+    model,
+    verify,
+    summary: prompt.replace(/\s+/g, " ").slice(0, 100),
+    startedAt: nowIso(),
+    completedAt: null,
+    sessionId: null,
+    logFile,
+    pid: null,
+    // Which server instance launched this job — session-end cleanup must only
+    // ever touch its own jobs, never another live session's.
+    launcherPid: process.pid
+  });
+  pruneJobs();
+
+  const child = spawn(process.execPath, [SELF_PATH, "worker", "--job-id", jobId], {
+    cwd: PLUGIN_ROOT,
+    env: process.env,
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true
+  });
+  child.unref();
+  updateJob(jobId, { pid: child.pid ?? null });
+  log(`launched background job ${jobId} (pid ${child.pid}) cwd=${taskCwd} edit=${edit}`);
+
+  return {
+    content: [
+      {
+        type: "text",
+        text:
+          `Started background consult job ${jobId} in ${taskCwd} (edit=${edit}).\n` +
+          `- progress: consult_status ${jobId}\n` +
+          `- result:   consult_result ${jobId}\n` +
+          `- cancel:   consult_cancel ${jobId}\n` +
+          `- live log: ${logFile}`
+      }
+    ]
+  };
+}
+
+async function handleConsult(args, ctx) {
+  const parsed = parseConsultArgs(args);
+  if (parsed.error) {
+    return { content: [{ type: "text", text: parsed.error }], isError: true };
+  }
+  const { prompt, taskCwd, edit, model, resumeId, verify } = parsed;
+
+  if (args?.background) {
+    return launchBackgroundConsult(parsed);
+  }
+
+  const progress = openProgressLog(taskCwd);
+  progress.write(`consult · cwd=${taskCwd} · edit=${edit} · resume=${resumeId ?? "no"} · model=${model ?? "default"}`);
+  log(`consult: cwd=${taskCwd} edit=${edit} resume=${resumeId ?? "no"} model=${model ?? "default"} log=${progress.file ?? "none"}`);
+
+  // Register this run so notifications/cancelled and session shutdown can
+  // terminate the claude process tree — it must never outlive the request.
+  const requestId = ctx?.requestId;
+  let childPid = null;
+  const tracker = {
+    cancelled: false,
+    cancel() {
+      this.cancelled = true;
+      if (childPid != null) {
+        terminateProcessTree(childPid);
+      }
+    }
+  };
+  if (requestId !== undefined && requestId !== null) {
+    activeForegroundRuns.set(requestId, tracker);
+  }
+
+  try {
+    const run = await runClaude({
+      cwd: taskCwd,
+      prompt,
+      edit,
+      resumeId,
+      model,
+      progress,
+      ownProcessGroup: true,
+      maxRuntimeMs: FOREGROUND_MAX_RUNTIME_MS,
+      onChild: (child) => {
+        childPid = child.pid ?? null;
+        if (tracker.cancelled) {
+          terminateProcessTree(childPid);
+        }
+      }
+    });
+    childPid = null; // claude is done; only a verify child may need killing now
+
+    if (tracker.cancelled) {
+      progress.close("cancelled by client");
+      log(`consult cancelled by client (request ${requestId})`);
+      return { cancelled: true };
+    }
+
+    if (run.maxRuntimeExceeded) {
+      progress.close();
+      const logNote = progress.file ? `\n\n📋 Progress log: ${progress.file}` : "";
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `Claude Code hit the foreground time limit (${Math.round(FOREGROUND_MAX_RUNTIME_MS / 60000)}m) and was stopped. ` +
+              `For work this long, use background=true and poll consult_status.${logNote}`
+          }
+        ],
+        isError: true
+      };
+    }
+
+    if (!run.ok && run.error) {
+      progress.close();
+      const logNote = progress.file ? `\n\n📋 Progress log: ${progress.file}` : "";
+      return { content: [{ type: "text", text: `Could not run Claude Code: ${run.error}${logNote}` }], isError: true };
+    }
+
+    // Claude ran — optionally verify its edits from the server (no approval gate).
+    let verifyResult = null;
+    if (verify) {
+      progress.write(`running verification: ${verify}`);
+      verifyResult = await runVerify(taskCwd, verify, run.touchedFiles, {
+        onChild: (child) => {
+          childPid = child.pid ?? null;
+          if (tracker.cancelled) {
+            terminateProcessTree(childPid);
+          }
+        }
+      });
+      childPid = null;
+    }
+    progress.close();
+
+    if (tracker.cancelled) {
+      log(`consult cancelled by client during verify (request ${requestId})`);
+      return { cancelled: true };
+    }
+
+    if (run.sessionId) {
+      setLastSession(taskCwd, run.sessionId);
+    }
+
+    let text = renderResult(run, { taskCwd, edit, usedResume: Boolean(resumeId) });
+    if (verifyResult) {
+      text += renderVerify(verifyResult);
+    }
+    if (progress.file) {
+      text += `\n\n📋 Progress log: ${progress.file} (tail -f to watch a run live)`;
+    }
+    if (run.isError) {
+      const tail = run.stderr ? run.stderr.split("\n").slice(-3).join(" ") : "";
+      text += `\n\n(Claude ended with: ${run.subtype ?? "error"}.${tail ? ` ${tail}` : ""})`;
+      return { content: [{ type: "text", text }], isError: true };
+    }
+    return { content: [{ type: "text", text }] };
+  } finally {
+    if (requestId !== undefined && requestId !== null) {
+      activeForegroundRuns.delete(requestId);
+    }
+  }
+}
+
+async function handleSetup(args) {
+  const deep = Boolean(args?.deep);
+  log(`setup: deep=${deep}`);
+  const status = await checkClaudeReadiness({ deep });
+  return { content: [{ type: "text", text: renderReadiness(status) }] };
+}
+
+// Resolve the target job, distinguishing "no jobs at all" from "the id you gave
+// doesn't match any job" so the message isn't misleading.
+function resolveJob(args) {
+  const jobs = listJobs();
+  const jobId = args?.job_id;
+  if (jobId) {
+    const job = jobs.find((j) => j.id === jobId);
+    return job ? { job } : { error: `No job found with id \`${jobId}\`.` };
+  }
+  if (jobs.length === 0) {
+    return { error: "No background consult jobs found." };
+  }
+  return { job: jobs[0] };
+}
+
+function formatElapsed(job) {
+  const start = Date.parse(job.startedAt || "");
+  if (!Number.isFinite(start)) {
+    return "";
+  }
+  const end = job.completedAt ? Date.parse(job.completedAt) : Date.now();
+  const seconds = Math.max(0, Math.round((end - start) / 1000));
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return minutes ? `${minutes}m${rest}s` : `${rest}s`;
+}
+
+function tailLog(file, count = 8) {
+  try {
+    const lines = fs.readFileSync(file, "utf8").split("\n").filter(Boolean);
+    return lines.slice(-count).join("\n") || "(no activity yet)";
+  } catch {
+    return "(no log yet)";
+  }
+}
+
+function handleStatusTool(args) {
+  const { job, error } = resolveJob(args);
+  if (error) {
+    return { content: [{ type: "text", text: error }] };
+  }
+  const head = `Job ${job.id} · ${job.status} · ${formatElapsed(job)} · ${job.cwd}`;
+  const task = job.summary ? `Task: ${job.summary}\n` : "";
+  const footer =
+    job.status === "running"
+      ? `\n\n(still running — call consult_result ${job.id} when it's done)`
+      : `\n\n(call consult_result ${job.id} for the full result)`;
+  return {
+    content: [{ type: "text", text: `${head}\n${task}\nRecent activity:\n${tailLog(job.logFile, 8)}${footer}` }]
+  };
+}
+
+function handleResultTool(args) {
+  const { job, error } = resolveJob(args);
+  if (error) {
+    return { content: [{ type: "text", text: error }] };
+  }
+  if (job.status === "running") {
+    return {
+      content: [
+        { type: "text", text: `Job ${job.id} is still running (${formatElapsed(job)}). Use consult_status ${job.id} to watch progress.` }
+      ]
+    };
+  }
+  if (job.status === "cancelled") {
+    return { content: [{ type: "text", text: `Job ${job.id} was cancelled.\n\n📋 Progress log: ${job.logFile}` }] };
+  }
+  if (job.status === "timed_out") {
+    return {
+      content: [
+        { type: "text", text: `Job ${job.id} exceeded the max runtime and was terminated. ${job.error ?? ""}\n\n📋 Progress log: ${job.logFile}` }
+      ],
+      isError: true
+    };
+  }
+
+  const r = job.result ?? {};
+  let text = renderResult(
+    { result: r.result, sessionId: r.sessionId, touchedFiles: r.touchedFiles, numTurns: r.numTurns, costUsd: r.costUsd },
+    { taskCwd: job.cwd, edit: job.edit, usedResume: Boolean(job.resumeId) }
+  );
+  if (r.verify) {
+    text += renderVerify(r.verify);
+  }
+  if (job.logFile) {
+    text += `\n\n📋 Progress log: ${job.logFile}`;
+  }
+  if (r.isError) {
+    const tail = r.stderr ? r.stderr.split("\n").slice(-3).join(" ") : "";
+    text += `\n\n(Claude ended with: ${r.subtype ?? "error"}.${tail ? ` ${tail}` : ""})`;
+    return { content: [{ type: "text", text }], isError: true };
+  }
+  return { content: [{ type: "text", text }] };
+}
+
+function handleCancelTool(args) {
+  const { job, error } = resolveJob(args);
+  if (error) {
+    return { content: [{ type: "text", text: error }] };
+  }
+  if (job.status !== "running") {
+    return { content: [{ type: "text", text: `Job ${job.id} is not running (status: ${job.status}).` }] };
+  }
+  const killed = terminateProcessTree(job.pid);
+  if (job.verifyPid != null) {
+    terminateProcessTree(job.verifyPid); // verify shell runs in its own group
+  }
+  // Re-read before stamping: the worker may have finished in the meantime, and
+  // a completed result must not be relabelled as cancelled.
+  const fresh = readJob(job.id) ?? job;
+  if (fresh.status !== "running") {
+    return {
+      content: [
+        { type: "text", text: `Job ${job.id} finished just before cancellation (status: ${fresh.status}) — its result is preserved.` }
+      ]
+    };
+  }
+  updateJob(job.id, { status: "cancelled", completedAt: nowIso(), error: "cancelled by user" });
+  return { content: [{ type: "text", text: `Cancelled job ${job.id}${killed ? "" : " (process was already gone)"}.` }] };
+}
+
+async function handleMessage(message) {
+  const { id, method, params } = message ?? {};
+
+  // Notifications carry no id and expect no reply.
+  if (id === undefined || id === null) {
+    if (method === "notifications/cancelled") {
+      const tracker = activeForegroundRuns.get(params?.requestId);
+      if (tracker) {
+        log(`client cancelled request ${params?.requestId}${params?.reason ? ` (${params.reason})` : ""}`);
+        tracker.cancel();
+      }
+    }
+    return;
+  }
+
+  switch (method) {
+    case "initialize": {
+      const requested = typeof params?.protocolVersion === "string" ? params.protocolVersion : null;
+      reply(id, {
+        protocolVersion: requested && SUPPORTED_PROTOCOL_VERSIONS.has(requested) ? requested : LATEST_PROTOCOL_VERSION,
+        capabilities: { tools: { listChanged: false } },
+        serverInfo: { name: SERVER_NAME, version: SERVER_VERSION }
+      });
+      return;
+    }
+    case "ping":
+      reply(id, {});
+      return;
+    case "tools/list":
+      reply(id, { tools: TOOLS });
+      return;
+    case "tools/call": {
+      const handlers = {
+        consult: handleConsult,
+        setup: handleSetup,
+        consult_status: handleStatusTool,
+        consult_result: handleResultTool,
+        consult_cancel: handleCancelTool
+      };
+      const handler = handlers[params?.name];
+      if (!handler) {
+        replyError(id, -32602, `Unknown tool: ${params?.name}`);
+        return;
+      }
+      try {
+        const result = await handler(params?.arguments ?? {}, { requestId: id });
+        // A request cancelled via notifications/cancelled gets no response
+        // (the client already gave up on it — per the MCP cancellation spec).
+        if (result?.cancelled === true && !result.content) {
+          return;
+        }
+        reply(id, result);
+      } catch (err) {
+        reply(id, {
+          content: [{ type: "text", text: `Unexpected error in ${params?.name}: ${err?.message ?? String(err)}` }],
+          isError: true
+        });
+      }
+      return;
+    }
+    default:
+      replyError(id, -32601, `Method not found: ${method}`);
+  }
+}
+
+// One background job: read its stored request, run Claude with a live log, and
+// write the outcome back to the job file. A watchdog bounds the runtime so a
+// stuck/runaway run can never burn usage indefinitely.
+async function runWorker() {
+  const idx = process.argv.indexOf("--job-id");
+  const jobId = idx >= 0 ? process.argv[idx + 1] : null;
+  const job = jobId ? readJob(jobId) : null;
+  if (!job) {
+    log(`worker: no job found for ${jobId}`);
+    process.exit(1);
+    return;
+  }
+
+  updateJob(jobId, { status: "running", pid: process.pid });
+  const progress = openProgressLog(job.cwd, { key: jobId });
+  progress.write(`background job ${jobId} · cwd=${job.cwd} · edit=${job.edit} · resume=${job.resumeId ?? "no"}`);
+
+  let timedOut = false;
+  let verifyPid = null;
+  const watchdog = setTimeout(() => {
+    timedOut = true;
+    progress.write("■ watchdog: exceeded max runtime — terminating");
+    updateJob(jobId, {
+      status: "timed_out",
+      completedAt: nowIso(),
+      error: `exceeded max runtime (${Math.round(WORKER_MAX_RUNTIME_MS / 60000)}m)`
+    });
+    progress.close();
+    if (verifyPid != null) {
+      terminateProcessTree(verifyPid); // verify runs in its own group
+    }
+    try {
+      process.kill(-process.pid, "SIGTERM");
+    } catch {
+      // ignore
+    }
+    process.exit(1);
+  }, WORKER_MAX_RUNTIME_MS);
+
+  // claude joins THIS worker's process group (no ownProcessGroup), so killing
+  // the worker group — by cancel or by the watchdog — also kills claude.
+  const run = await runClaude({
+    cwd: job.cwd,
+    prompt: job.prompt,
+    edit: job.edit,
+    resumeId: job.resumeId,
+    model: job.model,
+    progress
+  });
+  if (timedOut) {
+    return;
+  }
+  let verifyResult = null;
+  if (job.verify) {
+    progress.write(`running verification: ${job.verify}`);
+    // The verify shell is its own group (so its timeout can group-kill it);
+    // record its pid so cancel/cleanup/watchdog can reach it too.
+    verifyResult = await runVerify(job.cwd, job.verify, run.touchedFiles, {
+      onChild: (child) => {
+        verifyPid = child.pid ?? null;
+        updateJob(jobId, { verifyPid });
+      }
+    });
+    verifyPid = null;
+    updateJob(jobId, { verifyPid: null });
+  }
+  clearTimeout(watchdog);
+  if (timedOut) {
+    return;
+  }
+  progress.close();
+  if (run.sessionId) {
+    setLastSession(job.cwd, run.sessionId);
+  }
+  updateJob(jobId, {
+    status: run.error || run.isError ? "error" : "done",
+    completedAt: nowIso(),
+    sessionId: run.sessionId ?? null,
+    result: {
+      result: run.result ?? "",
+      isError: Boolean(run.isError),
+      subtype: run.subtype ?? null,
+      numTurns: run.numTurns ?? null,
+      costUsd: run.costUsd ?? null,
+      touchedFiles: run.touchedFiles ?? [],
+      sessionId: run.sessionId ?? null,
+      error: run.error ?? null,
+      stderr: run.stderr ?? "",
+      verify: verifyResult
+    }
+  });
+  process.exit(0);
+}
+
+function cleanupRunningJobsOnExit() {
+  try {
+    for (const job of listJobs()) {
+      // Only reap jobs THIS server launched — a concurrent Codex session's
+      // jobs belong to its own server instance.
+      if (job.status === "running" && job.launcherPid === process.pid && Number.isFinite(Number(job.pid))) {
+        terminateProcessTree(job.pid);
+        if (job.verifyPid != null) {
+          terminateProcessTree(job.verifyPid);
+        }
+        updateJob(job.id, { status: "cancelled", completedAt: nowIso(), error: "session ended" });
+      }
+    }
+  } catch {
+    // best effort
+  }
+}
+
+// Session is ending — reap everything this server started: foreground claude
+// runs AND this session's background workers. Nothing may outlive the session
+// and keep burning usage.
+function shutdown(why) {
+  for (const tracker of activeForegroundRuns.values()) {
+    try {
+      tracker.cancel();
+    } catch {
+      // best effort
+    }
+  }
+  activeForegroundRuns.clear();
+  cleanupRunningJobsOnExit();
+  log(`${why}, exiting`);
+  process.exit(0);
+}
+
+function main() {
+  log(`starting (plugin root: ${PLUGIN_ROOT})`);
+  if (process.platform === "win32") {
+    log(
+      "warning: Windows is not fully supported — process-group termination and bash-based auto-verify are unavailable, so cancellation may leave child processes running"
+    );
+  }
+  let buffer = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => {
+    buffer += chunk;
+    let idx;
+    while ((idx = buffer.indexOf("\n")) !== -1) {
+      const line = buffer.slice(0, idx).trim();
+      buffer = buffer.slice(idx + 1);
+      if (!line) {
+        continue;
+      }
+      let message;
+      try {
+        message = JSON.parse(line);
+      } catch (err) {
+        log(`failed to parse incoming line: ${err.message}`);
+        continue;
+      }
+      // Dispatch without blocking the read loop so long consults don't stall
+      // pings or other messages.
+      Promise.resolve(handleMessage(message)).catch((err) => log(`handler error: ${err?.message ?? err}`));
+    }
+  });
+  process.stdin.on("end", () => shutdown("stdin closed"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
+}
+
+if (process.argv[2] === "worker") {
+  runWorker().catch((err) => {
+    log(`worker error: ${err?.message ?? err}`);
+    process.exit(1);
+  });
+} else {
+  main();
+}

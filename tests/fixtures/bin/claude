@@ -1,0 +1,60 @@
+#!/usr/bin/env node
+// Fake `claude` CLI for tests. Mimics `claude -p --output-format stream-json`:
+// reads the prompt from stdin, emits newline-delimited stream-json events, and
+// reacts to magic markers in the prompt:
+//   SLEEP_FOREVER — emit the init event, then hang (for cancel/watchdog tests)
+//   TOUCH_FILE    — write fake-touched.py in cwd and emit a Write tool_use
+//   FAIL_RUN      — end with an error result
+// If FAKE_CLAUDE_CAPTURE is set, argv/prompt/cwd are recorded there so tests
+// can assert how the runner invoked us (stdin prompt, flags, --resume, …).
+//
+// NOTE: this file is extensionless but the repo's package.json says
+// `"type": "module"`, so it must use ESM syntax.
+import fs from "node:fs";
+
+const argv = process.argv.slice(2);
+if (argv.includes("--version")) {
+  process.stdout.write("9.9.9 (fake claude for tests)\n");
+  process.exit(0);
+}
+
+let prompt = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (d) => (prompt += d));
+process.stdin.on("end", () => {
+  const out = (o) => process.stdout.write(JSON.stringify(o) + "\n");
+  if (process.env.FAKE_CLAUDE_CAPTURE) {
+    try {
+      fs.writeFileSync(process.env.FAKE_CLAUDE_CAPTURE, JSON.stringify({ argv, prompt, cwd: process.cwd() }, null, 2));
+    } catch {}
+  }
+
+  out({ type: "system", subtype: "init", session_id: "sess-fake-1", model: "fake-model" });
+
+  const finish = () => {
+    if (prompt.includes("TOUCH_FILE")) {
+      const p = process.cwd() + "/fake-touched.py";
+      fs.writeFileSync(p, "print('hi')\n");
+      out({ type: "assistant", message: { content: [{ type: "tool_use", name: "Write", input: { file_path: p } }] } });
+    }
+    if (prompt.includes("FAIL_RUN")) {
+      out({ type: "result", subtype: "error_during_execution", is_error: true, result: "boom", num_turns: 1, session_id: "sess-fake-1" });
+    } else {
+      out({
+        type: "result",
+        subtype: "success",
+        result: "echo:" + prompt.slice(0, 60),
+        num_turns: 1,
+        total_cost_usd: 0.01,
+        session_id: "sess-fake-1"
+      });
+    }
+    process.exit(0);
+  };
+
+  if (prompt.includes("SLEEP_FOREVER")) {
+    setTimeout(finish, 300000); // killed long before this fires
+  } else {
+    finish();
+  }
+});

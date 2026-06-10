@@ -1,0 +1,22 @@
+{
+  "name": "claude-code",
+  "version": "0.8.0",
+  "description": "Consult Claude Code from inside Codex — hand a task to Claude and get a gentle, thorough pass back in the same repo.",
+  "author": {
+    "name": "cc-plugin-codex"
+  },
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Claude Code",
+    "shortDescription": "Delegate tasks to Claude Code, gently.",
+    "longDescription": "Lets Codex consult Claude Code as a collaborative second agent. Claude runs in the same repository via its headless mode, reusing your existing Claude login, and reports back. Gentle by default: it investigates and advises without editing unless you ask it to.",
+    "developerName": "cc-plugin-codex",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": [
+      "Have Claude Code redesign this page and make sure it still works",
+      "Get a gentle second opinion from Claude on this change"
+    ]
+  }
+}

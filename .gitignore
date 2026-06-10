@@ -1,0 +1,7 @@
+# local Claude Code session settings
+.claude/
+
+# runtime / build leftovers
+node_modules/
+__pycache__/
+*.log
