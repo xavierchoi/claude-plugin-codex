@@ -135,7 +135,7 @@ test("model/effort: per-call args win, settings provide defaults, invalid effort
   }
 });
 
-test("model omitted everywhere → built-in default: fable with sonnet fallback", async () => {
+test("model omitted everywhere → built-in default: fable, falling back to opus then sonnet", async () => {
   const HOME = makeTempHome();
   const capture = path.join(HOME, "capture.json");
   const s = startServer(fakeClaudeEnv(HOME, { FAKE_CLAUDE_CAPTURE: capture }));
@@ -144,7 +144,7 @@ test("model omitted everywhere → built-in default: fable with sonnet fallback"
     await s.rpc("tools/call", { name: "consult", arguments: { prompt: "hi", cwd: HOME } });
     const c = JSON.parse(fs.readFileSync(capture, "utf8"));
     assert.ok(c.argv.includes("--model") && c.argv.includes("fable"), `argv: ${c.argv.join(" ")}`);
-    assert.ok(c.argv.includes("--fallback-model") && c.argv.includes("sonnet"));
+    assert.ok(c.argv.includes("--fallback-model") && c.argv.includes("opus,sonnet"));
     assert.ok(!c.argv.includes("--effort"), "no effort default — Claude decides");
   } finally {
     s.stop();

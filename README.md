@@ -151,9 +151,9 @@ Have opus review this design.                        → model: opus
 
 Mention it and Codex passes it through (`--model` accepts aliases like
 `sonnet`/`opus`/`fable` or full names; `--effort` is `low`…`max`). When you
-don't, the default model is **`fable`** — the newest Claude — with automatic
-fallback to `sonnet` when a plan can't serve it. The result's meta line shows
-which model actually answered. To change the default, add to
+don't, the default model is **`fable`** — the newest Claude — falling back
+automatically to `opus`, then `sonnet`, when a plan can't serve it. The
+result's meta line shows which model actually answered. To change the default, add to
 `~/.config/cc-plugin-codex/settings.json`:
 
 ```json

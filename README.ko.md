@@ -149,9 +149,9 @@ opus로 이 설계 리뷰해 줘.                            → model: opus
 
 말하면 Codex가 그대로 전달합니다(`--model`은 `sonnet`/`opus`/`fable` 같은
 별칭이나 전체 이름, `--effort`는 `low`…`max`). 말하지 않으면 기본 모델은
-**`fable`** — 최신 Claude — 이고, 플랜에서 사용할 수 없으면 `sonnet`으로
-자동 폴백됩니다. 실제로 어떤 모델이 답했는지는 결과의 메타 라인에
-표시됩니다. 기본값을 바꾸려면 `~/.config/cc-plugin-codex/settings.json`에
+**`fable`** — 최신 Claude — 이고, 플랜에서 사용할 수 없으면 `opus`,
+그다음 `sonnet` 순으로 자동 폴백됩니다. 실제로 어떤 모델이 답했는지는
+결과의 메타 라인에 표시됩니다. 기본값을 바꾸려면 `~/.config/cc-plugin-codex/settings.json`에
 추가하세요:
 
 ```json

@@ -144,8 +144,8 @@ Claude 运行时带着你在 Claude Code 中安装的技能：
 
 只要说出来，Codex 就会原样传递（`--model` 接受 `sonnet`/`opus`/`fable` 等
 别名或完整名称；`--effort` 为 `low`…`max`）。不指定时，默认模型为
-**`fable`** —— 最新的 Claude —— 若套餐无法使用则自动回退到 `sonnet`。
-结果的元信息行会显示实际作答的模型。要更改默认值，请写入
+**`fable`** —— 最新的 Claude —— 若套餐无法使用则依次自动回退到 `opus`、
+`sonnet`。结果的元信息行会显示实际作答的模型。要更改默认值，请写入
 `~/.config/cc-plugin-codex/settings.json`：
 
 ```json

@@ -66,7 +66,7 @@ request into the right call yourself:
   "continue where Claude left off". A fresh, unrelated task → omit it.
 - **model / effort** → omit both unless the user signals a preference. The
   default model is `fable` (the newest Claude, with automatic fallback to
-  `sonnet` if their plan can't serve it) — usually right. "quick / cheap /
+  `opus`, then `sonnet`, if their plan can't serve it) — usually right. "quick / cheap /
   rough pass" → `effort: "low"`. "think hard / be thorough / tricky problem" →
   `effort: "high"` (or `"max"` for the hardest). A named model ("use opus",
   "with sonnet") → pass it through as `model`; "use my own Claude default" →

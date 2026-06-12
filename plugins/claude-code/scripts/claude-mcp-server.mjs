@@ -26,7 +26,7 @@ import { loadSettings } from "./lib/settings.mjs";
 import { collectDiff } from "./lib/git-diff.mjs";
 
 const SERVER_NAME = "claude-code";
-const SERVER_VERSION = "0.11.0";
+const SERVER_VERSION = "0.11.1";
 
 // claude CLI's --effort levels (claude --help).
 const EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
@@ -37,7 +37,9 @@ const EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
 // degrade gracefully instead of erroring. `"inherit"` (per call or in
 // settings) defers to the user's own Claude configuration.
 const DEFAULT_MODEL = "fable";
-const DEFAULT_FALLBACK_MODEL = "sonnet";
+// Tried in order when fable is unavailable: opus keeps the quality bar high,
+// sonnet is the last-resort safety net for plans that have neither.
+const DEFAULT_FALLBACK_MODEL = "opus,sonnet";
 const INHERIT_MODEL = "inherit";
 // Versions this server actually implements. If the client asks for something
 // else, answer with the latest one we support (per the MCP spec) instead of
@@ -110,7 +112,7 @@ const CONSULT_TOOL = {
       model: {
         type: "string",
         description:
-          "Optional Claude model: an alias ('sonnet', 'opus', 'fable') or a full model name. Default: 'fable' (the newest Claude, with automatic fallback to 'sonnet' if unavailable) unless the plugin settings say otherwise. Pass 'inherit' to use the user's own Claude configuration. Omit unless the user asks for a specific or cheaper model."
+          "Optional Claude model: an alias ('sonnet', 'opus', 'fable') or a full model name. Default: 'fable' (the newest Claude, with automatic fallback to 'opus', then 'sonnet', if unavailable) unless the plugin settings say otherwise. Pass 'inherit' to use the user's own Claude configuration. Omit unless the user asks for a specific or cheaper model."
       },
       effort: {
         type: "string",
