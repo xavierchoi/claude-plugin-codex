@@ -34,7 +34,7 @@ export const jobsDir = (home) => path.join(home, ".cache", "cc-plugin-codex", "j
 // Env for a server/runner that should find the FAKE claude on PATH and keep
 // all state under a temp HOME.
 export function fakeClaudeEnv(tmpHome, extra = {}) {
-  return {
+  const env = {
     ...process.env,
     HOME: tmpHome,
     PATH: `${FIXTURES_BIN}:${process.env.PATH}`,
@@ -43,6 +43,10 @@ export function fakeClaudeEnv(tmpHome, extra = {}) {
     CC_PLUGIN_CODEX_SETTINGS: path.join(tmpHome, "settings.json"),
     ...extra
   };
+  // cost rendering depends on this — make tests deterministic regardless of
+  // the machine running them
+  delete env.ANTHROPIC_API_KEY;
+  return env;
 }
 
 export function writeFakeJob(home, id, patch = {}) {
@@ -94,9 +98,11 @@ export function claudeProcsUnder(cwdPrefix) {
   return out.join("\n");
 }
 
-// Minimal JSON-RPC stdio client around a spawned MCP server.
+// Minimal JSON-RPC stdio client around a spawned MCP server. Uses
+// process.execPath (not "node" via the child PATH) so PATH-crippling tests
+// and CI runners without a system node still work.
 export function startServer(env = process.env) {
-  const child = spawn("node", [SERVER_PATH], { env, stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawn(process.execPath, [SERVER_PATH], { env, stdio: ["pipe", "pipe", "pipe"] });
   const pending = new Map();
   let buf = "";
   child.stdout.setEncoding("utf8");

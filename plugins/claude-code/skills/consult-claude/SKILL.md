@@ -47,9 +47,16 @@ request into the right call yourself:
   explanation, or investigation*.
 - **background** → `true` for anything beyond a quick change — redesigns,
   multi-file work, "improve the whole X", or anything likely to take more than a
-  minute. Tell the user you've started it with the job id, then check
-  `consult_status` and report the `consult_result` when it finishes. Use the
-  foreground (omit `background`) only for quick read-only questions.
+  minute. Right after launching, tell the user the job id and that they can
+  watch it live (`tail -f` the log path from the launch reply). Then **don't
+  poll in a loop** — call `consult_status` with `wait_seconds: 60`; it blocks
+  until the job finishes (or 60s passes), so one or two calls usually suffice.
+  Report the `consult_result` when it's done. Use the foreground (omit
+  `background`) only for quick read-only questions; foreground runs show no
+  progress in the UI, so warn the user it may take a minute.
+- **resume** → `true` when the request is a follow-up to what Claude just did
+  in this directory — "have Claude refine that", "ask it to also fix X",
+  "continue where Claude left off". A fresh, unrelated task → omit it.
 - **verify** → for any **edit** task, pass `verify: "auto"` — the server runs a
   syntax check on whatever files Claude touched (you don't need to know the
   command). Use an explicit command only when the user names a check ("make sure

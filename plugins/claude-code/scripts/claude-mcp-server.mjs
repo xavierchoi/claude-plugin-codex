@@ -24,7 +24,7 @@ import { terminateProcessTree } from "./lib/process.mjs";
 import { runVerify, renderVerify } from "./lib/verify.mjs";
 
 const SERVER_NAME = "claude-code";
-const SERVER_VERSION = "0.8.0";
+const SERVER_VERSION = "0.9.0";
 // Versions this server actually implements. If the client asks for something
 // else, answer with the latest one we support (per the MCP spec) instead of
 // echoing an arbitrary string back.
@@ -132,11 +132,15 @@ const SETUP_TOOL = {
 const STATUS_TOOL = {
   name: "consult_status",
   description:
-    "Check a background consult job: status (running/done/error/cancelled/timed_out), elapsed time, and recent activity from its live log. Omit job_id for the most recent job.",
+    "Check a background consult job: status (running/done/error/cancelled/timed_out), elapsed time, and recent activity from its live log. Omit job_id for the most recent job. Pass wait_seconds (e.g. 60) to long-poll: the call blocks until the job finishes or the wait elapses — much more efficient than polling in a loop.",
   inputSchema: {
     type: "object",
     properties: {
-      job_id: { type: "string", description: "Job id from consult(background=true). Omit for the most recent job." }
+      job_id: { type: "string", description: "Job id from consult(background=true). Omit for the most recent job." },
+      wait_seconds: {
+        type: "number",
+        description: "Block up to this many seconds (max 60) waiting for the job to finish before reporting. Recommended: 60."
+      }
     },
     additionalProperties: false
   }
@@ -185,6 +189,15 @@ function resolveTaskCwd(rawCwd) {
   return { cwd: null, error: "Please pass `cwd`: the absolute path of the directory Claude should work in." };
 }
 
+function formatDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) {
+    return null;
+  }
+  const seconds = Math.round(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  return minutes ? `${minutes}m${seconds % 60}s` : `${seconds}s`;
+}
+
 function renderResult(run, { taskCwd, edit, usedResume }) {
   const lines = [];
   const verb = edit ? "made changes in" : "advised on";
@@ -211,14 +224,33 @@ function renderResult(run, { taskCwd, edit, usedResume }) {
   if (run.numTurns != null) {
     meta.push(`${run.numTurns} turn${run.numTurns === 1 ? "" : "s"}`);
   }
+  const duration = formatDuration(run.durationMs);
+  if (duration) {
+    meta.push(duration);
+  }
   if (typeof run.costUsd === "number") {
-    meta.push(`$${run.costUsd.toFixed(4)}`);
+    // With the user's Claude login this is plan usage, not a separate bill —
+    // say so, or the dollar figure reads as a surprise charge.
+    meta.push(process.env.ANTHROPIC_API_KEY ? `$${run.costUsd.toFixed(4)} API-billed` : `≈$${run.costUsd.toFixed(4)} of plan usage`);
   }
   if (meta.length) {
     lines.push("");
     lines.push(`( ${meta.join(" · ")} )`);
   }
   return lines.join("\n");
+}
+
+// Turn a failed launch into the next action, so recovery doesn't depend on the
+// model having read the skill instructions.
+function launchHint(error, stderr = "") {
+  const haystack = `${error ?? ""}\n${stderr ?? ""}`;
+  if (/ENOENT/.test(haystack)) {
+    return "\n→ Claude Code doesn't seem to be installed. Install it with `curl -fsSL https://claude.ai/install.sh | bash` (or `npm install -g @anthropic-ai/claude-code`), then run the `setup` tool to confirm.";
+  }
+  if (/(log ?in|sign ?in|credential|authenticat|api key|unauthorized|\b401\b)/i.test(haystack)) {
+    return "\n→ Claude doesn't seem to be signed in. Run `claude` once in a terminal to log in, or run the `setup` tool with deep: true to diagnose.";
+  }
+  return "\n→ Run the `setup` tool to diagnose (it checks the install and login).";
 }
 
 function parseConsultArgs(args) {
@@ -333,6 +365,7 @@ async function handleConsult(args, ctx) {
   }
 
   try {
+    const startedMs = Date.now();
     const run = await runClaude({
       cwd: taskCwd,
       prompt,
@@ -349,6 +382,7 @@ async function handleConsult(args, ctx) {
         }
       }
     });
+    run.durationMs = Date.now() - startedMs;
     childPid = null; // claude is done; only a verify child may need killing now
 
     if (tracker.cancelled) {
@@ -376,7 +410,10 @@ async function handleConsult(args, ctx) {
     if (!run.ok && run.error) {
       progress.close();
       const logNote = progress.file ? `\n\n📋 Progress log: ${progress.file}` : "";
-      return { content: [{ type: "text", text: `Could not run Claude Code: ${run.error}${logNote}` }], isError: true };
+      return {
+        content: [{ type: "text", text: `Could not run Claude Code: ${run.error}${launchHint(run.error, run.stderr)}${logNote}` }],
+        isError: true
+      };
     }
 
     // Claude ran — optionally verify its edits from the server (no approval gate).
@@ -414,6 +451,9 @@ async function handleConsult(args, ctx) {
     if (run.isError) {
       const tail = run.stderr ? run.stderr.split("\n").slice(-3).join(" ") : "";
       text += `\n\n(Claude ended with: ${run.subtype ?? "error"}.${tail ? ` ${tail}` : ""})`;
+      if (/(log ?in|sign ?in|credential|authenticat|api key|unauthorized|\b401\b)/i.test(run.stderr ?? "")) {
+        text += launchHint("", run.stderr);
+      }
       return { content: [{ type: "text", text }], isError: true };
     }
     return { content: [{ type: "text", text }] };
@@ -467,11 +507,34 @@ function tailLog(file, count = 8) {
   }
 }
 
-function handleStatusTool(args) {
-  const { job, error } = resolveJob(args);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function handleStatusTool(args) {
+  let { job, error } = resolveJob(args);
   if (error) {
     return { content: [{ type: "text", text: error }] };
   }
+
+  // Long-poll: park here until the job leaves "running" or the wait elapses,
+  // so the caller doesn't burn turns polling in a loop.
+  const waitMs = Math.min(Math.max(Number(args?.wait_seconds) || 0, 0), 60) * 1000;
+  if (waitMs > 0 && job.status === "running") {
+    const deadline = Date.now() + waitMs;
+    while (Date.now() < deadline) {
+      await sleep(Math.min(1000, deadline - Date.now()));
+      const fresh = readJob(job.id);
+      if (fresh) {
+        job = fresh;
+      }
+      if (job.status !== "running") {
+        break;
+      }
+    }
+    // Re-resolve through listJobs so a worker that died mid-wait is
+    // reconciled instead of reported as eternally "running".
+    job = listJobs().find((j) => j.id === job.id) ?? job;
+  }
+
   const head = `Job ${job.id} · ${job.status} · ${formatElapsed(job)} · ${job.cwd}`;
   const task = job.summary ? `Task: ${job.summary}\n` : "";
   const footer =
@@ -508,8 +571,21 @@ function handleResultTool(args) {
   }
 
   const r = job.result ?? {};
+
+  // A job that never produced a result (launch failure, or a worker that died
+  // and was reconciled) must explain itself, not render an empty result.
+  if (job.status === "error" && (r.error || !job.result)) {
+    const reason = r.error ?? job.error ?? "unknown error";
+    const logNote = job.logFile ? `\n\n📋 Progress log: ${job.logFile}` : "";
+    return {
+      content: [{ type: "text", text: `Could not run Claude Code: ${reason}${launchHint(reason, r.stderr)}${logNote}` }],
+      isError: true
+    };
+  }
+
+  const durationMs = Date.parse(job.completedAt || "") - Date.parse(job.startedAt || "");
   let text = renderResult(
-    { result: r.result, sessionId: r.sessionId, touchedFiles: r.touchedFiles, numTurns: r.numTurns, costUsd: r.costUsd },
+    { result: r.result, sessionId: r.sessionId, touchedFiles: r.touchedFiles, numTurns: r.numTurns, costUsd: r.costUsd, durationMs },
     { taskCwd: job.cwd, edit: job.edit, usedResume: Boolean(job.resumeId) }
   );
   if (r.verify) {

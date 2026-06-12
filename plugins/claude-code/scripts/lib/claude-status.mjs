@@ -119,7 +119,7 @@ export async function checkClaudeReadiness({ deep = false } = {}) {
   const nextSteps = [];
   if (!claude.available) {
     nextSteps.push(
-      "Install Claude Code (`npm install -g @anthropic-ai/claude-code`, or see https://docs.claude.com/claude-code), then make sure `claude` is on your PATH."
+      "Install Claude Code: `curl -fsSL https://claude.ai/install.sh | bash` (or `npm install -g @anthropic-ai/claude-code`), then make sure `claude` is on your PATH."
     );
   }
   if (claude.available && auth.loggedIn === false) {

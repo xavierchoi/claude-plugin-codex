@@ -33,7 +33,10 @@ test("foreground consult: renders result, log pointer, cost", async () => {
     assert.match(t, /advised on/);
     assert.match(t, /echo:say hello/);
     assert.match(t, /📋 Progress log:/);
-    assert.match(t, /\$0\.0100/);
+    // OAuth-login runs are plan usage, not a separate bill — and the meta line
+    // carries a duration
+    assert.match(t, /≈\$0\.0100 of plan usage/);
+    assert.match(t, /· \d+m?\d*s ·/);
   } finally {
     s.stop();
   }
@@ -93,14 +96,56 @@ test("verify policy: shell-operator command is blocked through the server (safe 
   }
 });
 
-test("missing claude binary → friendly launch error", async () => {
+test("missing claude binary → friendly launch error WITH an install next-step", async () => {
   const HOME = makeTempHome();
   const s = startServer({ ...fakeClaudeEnv(HOME), PATH: "/usr/bin:/bin" });
   try {
     await initialized(s);
     const r = await s.rpc("tools/call", { name: "consult", arguments: { prompt: "hi", cwd: HOME } });
     assert.equal(r.result.isError, true);
-    assert.match(text(r), /Could not run Claude Code: failed to launch claude/);
+    const t = text(r);
+    assert.match(t, /Could not run Claude Code: failed to launch claude/);
+    assert.match(t, /curl -fsSL https:\/\/claude\.ai\/install\.sh/);
+    assert.match(t, /`setup` tool/);
+  } finally {
+    s.stop();
+  }
+});
+
+test("background launch failure → consult_result explains it with a next-step (not an empty result)", async () => {
+  const HOME = makeTempHome();
+  const s = startServer({ ...fakeClaudeEnv(HOME), PATH: "/usr/bin:/bin" });
+  try {
+    await initialized(s);
+    const launch = await s.rpc("tools/call", { name: "consult", arguments: { prompt: "hi", cwd: HOME, background: true } });
+    const jobId = (text(launch).match(/job-[a-f0-9]+/) || [])[0];
+    const final = await waitFor(() => {
+      const j = readJobFile(HOME, jobId);
+      return j.status !== "running" ? j : null;
+    });
+    assert.equal(final?.status, "error");
+    const r = await s.rpc("tools/call", { name: "consult_result", arguments: { job_id: jobId } });
+    assert.equal(r.result.isError, true);
+    const t = text(r);
+    assert.match(t, /Could not run Claude Code/);
+    assert.match(t, /install\.sh|setup/);
+    assert.ok(!t.includes("(Claude returned no text.)"), "must not render an empty result for a launch failure");
+  } finally {
+    s.stop();
+  }
+});
+
+test("consult_status wait_seconds long-polls until the job finishes", async () => {
+  const HOME = makeTempHome();
+  const s = startServer(fakeClaudeEnv(HOME));
+  try {
+    await initialized(s);
+    const launch = await s.rpc("tools/call", { name: "consult", arguments: { prompt: "long-poll me", cwd: HOME, background: true } });
+    const jobId = (text(launch).match(/job-[a-f0-9]+/) || [])[0];
+    // Called immediately — without the wait this would render "running";
+    // with it, one call returns the finished state.
+    const st = await s.rpc("tools/call", { name: "consult_status", arguments: { job_id: jobId, wait_seconds: 30 } }, 45000);
+    assert.match(text(st), /· done ·/);
   } finally {
     s.stop();
   }

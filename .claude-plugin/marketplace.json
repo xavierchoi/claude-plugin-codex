@@ -1,5 +1,5 @@
 {
-  "name": "cc-plugin-codex",
+  "name": "claude-plugin-codex",
   "interface": {
     "displayName": "Claude Code for Codex"
   },
