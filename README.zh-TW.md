@@ -176,6 +176,9 @@ codex plugin marketplace upgrade claude-plugin-codex
 codex plugin add claude-code@claude-plugin-codex
 ```
 
+更新後請開啟新的 Codex 工作階段：已開啟的工作階段仍使用舊的伺服器行程，
+在其下方升級可能導致橋接中斷（工具呼叫會以 "Transport closed" 失敗）。
+
 ## 運作原理
 
 ```

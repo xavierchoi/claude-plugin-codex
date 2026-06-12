@@ -21,6 +21,16 @@ If consulting fails, or the user asks whether the plugin is ready, call the
 returns any next steps (it reuses the user's existing Claude login — no extra
 API key needed). Pass `deep: true` to verify the login with a quick live call.
 
+## If the tools themselves fail (transport closed)
+
+If `claude-code` tool calls fail with a transport/connection error (e.g.
+"Transport closed"), the MCP bridge for this session is gone — this happens
+when the plugin was upgraded while the session was open. Tell the user to
+start a fresh Codex session; the tools will work again there. **Do not**
+work around it by invoking the `claude` CLI directly — especially not with
+permission overrides like `--dangerously-skip-permissions`; the bridge exists
+precisely to run Claude with safe, scoped permissions.
+
 ## How to call it
 
 Use the `consult` tool from the `claude-code` MCP server. Arguments:

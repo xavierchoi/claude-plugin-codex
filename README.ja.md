@@ -186,6 +186,11 @@ codex plugin marketplace upgrade claude-plugin-codex
 codex plugin add claude-code@claude-plugin-codex
 ```
 
+アップデート後は Codex セッションを新しく開いてください。既に開いている
+セッションは古いサーバープロセスを使い続けており、その下でアップグレード
+するとブリッジが切断されることがあります（ツール呼び出しが
+"Transport closed" で失敗します）。
+
 ## 仕組み
 
 ```

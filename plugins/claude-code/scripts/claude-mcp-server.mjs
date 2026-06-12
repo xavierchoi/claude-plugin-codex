@@ -26,7 +26,7 @@ import { loadSettings } from "./lib/settings.mjs";
 import { collectDiff } from "./lib/git-diff.mjs";
 
 const SERVER_NAME = "claude-code";
-const SERVER_VERSION = "0.11.2";
+const SERVER_VERSION = "0.11.3";
 
 // claude CLI's --effort levels (claude --help).
 const EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
@@ -74,7 +74,13 @@ function log(message) {
 }
 
 function send(message) {
-  process.stdout.write(`${JSON.stringify(message)}\n`);
+  // A write to a half-closed pipe must never take the server down — if the
+  // host is truly gone, stdin 'end' handles the shutdown.
+  try {
+    process.stdout.write(`${JSON.stringify(message)}\n`);
+  } catch (err) {
+    log(`failed to write to stdout: ${err?.message ?? err}`);
+  }
 }
 
 function reply(id, result) {
@@ -1061,8 +1067,16 @@ function main() {
     }
   });
   process.stdin.on("end", () => shutdown("stdin closed"));
+  // Lifecycle is stdin + SIGTERM/SIGHUP (host-initiated). SIGINT is a terminal
+  // interrupt aimed at the host's turn, not at this server — a stdio MCP
+  // server that exits on it takes the whole bridge down for the session.
   process.on("SIGTERM", () => shutdown("SIGTERM"));
-  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGHUP", () => shutdown("SIGHUP"));
+  process.on("SIGINT", () => log("ignoring SIGINT (terminal interrupt) — lifecycle is stdin/SIGTERM"));
+  // A tool server should degrade, not die: log the unexpected, keep serving.
+  process.stdout.on("error", (err) => log(`stdout error: ${err?.message ?? err}`));
+  process.on("uncaughtException", (err) => log(`uncaught exception (continuing): ${err?.stack ?? err}`));
+  process.on("unhandledRejection", (reason) => log(`unhandled rejection (continuing): ${reason?.stack ?? reason}`));
 }
 
 if (process.argv[2] === "worker") {

@@ -185,6 +185,10 @@ codex plugin marketplace upgrade claude-plugin-codex
 codex plugin add claude-code@claude-plugin-codex
 ```
 
+Then start a fresh Codex session: sessions that were already open keep the
+old server process, and upgrading underneath them can close their bridge
+(tool calls would fail with "Transport closed").
+
 ## How It Works
 
 ```

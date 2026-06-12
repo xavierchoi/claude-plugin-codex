@@ -1,6 +1,6 @@
 {
   "name": "claude-code",
-  "version": "0.11.2",
+  "version": "0.11.3",
   "description": "Consult Claude Code from inside Codex — hand a task to Claude and get a gentle, thorough pass back in the same repo.",
   "author": {
     "name": "cc-plugin-codex"

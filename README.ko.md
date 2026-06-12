@@ -182,6 +182,10 @@ codex plugin marketplace upgrade claude-plugin-codex
 codex plugin add claude-code@claude-plugin-codex
 ```
 
+업데이트 후에는 Codex 세션을 새로 여세요. 이미 열려 있던 세션은 이전 서버
+프로세스를 계속 쓰는데, 그 아래에서 업그레이드하면 브리지가 끊길 수
+있습니다(툴 호출이 "Transport closed"로 실패).
+
 ## 동작 방식
 
 ```

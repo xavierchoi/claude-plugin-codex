@@ -280,6 +280,37 @@ test("session end: reaps foreground run and OWN jobs; leaves another session's j
   }
 });
 
+test("signals: SIGINT is ignored (bridge survives terminal interrupts); SIGTERM shuts down and reaps own jobs", async () => {
+  const HOME = makeTempHome();
+  const s = startServer(fakeClaudeEnv(HOME));
+  const sleeper = spawn("sleep", ["120"], { detached: true, stdio: "ignore" });
+  try {
+    await initialized(s);
+
+    // SIGINT must NOT kill the server — a Ctrl+C aimed at the host's turn
+    // would otherwise take the whole MCP bridge down for the session.
+    s.child.kill("SIGINT");
+    await sleep(300);
+    const ping = await s.rpc("ping", {});
+    assert.deepEqual(ping.result, {}, "server must keep serving after SIGINT");
+
+    // SIGTERM is the host's shutdown signal — exit and reap own jobs.
+    writeFakeJob(HOME, "job-sigterm", { pid: sleeper.pid, launcherPid: s.child.pid, startedAt: new Date().toISOString() });
+    s.child.kill("SIGTERM");
+    await new Promise((r) => s.child.on("exit", r));
+    await sleep(300);
+    const job = readJobFile(HOME, "job-sigterm");
+    assert.equal(job.status, "cancelled");
+    assert.equal(job.error, "session ended");
+    assert.throws(() => process.kill(sleeper.pid, 0), "the job's process must be gone");
+  } finally {
+    try {
+      process.kill(sleeper.pid, "SIGKILL");
+    } catch {}
+    s.stop();
+  }
+});
+
 test("foreground watchdog: time limit returns an error and points to background mode", async () => {
   const HOME = makeTempHome();
   const work = fs.mkdtempSync(path.join(HOME, "wd-"));

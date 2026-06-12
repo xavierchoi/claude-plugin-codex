@@ -176,6 +176,9 @@ codex plugin marketplace upgrade claude-plugin-codex
 codex plugin add claude-code@claude-plugin-codex
 ```
 
+更新后请新开一个 Codex 会话：已打开的会话仍在使用旧的服务器进程，在其
+下方升级可能导致桥接断开（工具调用会以 "Transport closed" 失败）。
+
 ## 工作原理
 
 ```
