@@ -23,7 +23,7 @@ const KILL_ESCALATION_MS = 5000;
  * Gentle by default: without `edit`, Claude runs in plan mode (read-only,
  * advisory). With `edit`, it may accept its own file edits.
  */
-export function buildClaudeArgs({ edit, resumeId, model, effort }) {
+export function buildClaudeArgs({ edit, resumeId, model, effort, fallbackModel }) {
   const args = ["-p", "--output-format", "stream-json", "--verbose"];
   args.push("--permission-mode", edit ? "acceptEdits" : "plan");
   args.push("--append-system-prompt", HEADLESS_GUARDRAIL);
@@ -32,6 +32,11 @@ export function buildClaudeArgs({ edit, resumeId, model, effort }) {
   }
   if (model) {
     args.push("--model", model);
+  }
+  if (fallbackModel) {
+    // claude -p falls back automatically when the model is overloaded or not
+    // available (e.g. a plan without access to the newest model).
+    args.push("--fallback-model", fallbackModel);
   }
   if (effort) {
     args.push("--effort", effort);
@@ -68,6 +73,7 @@ export function runClaude({
   resumeId = null,
   model = null,
   effort = null,
+  fallbackModel = null,
   onEvent,
   progress,
   onChild,
@@ -75,7 +81,7 @@ export function runClaude({
   maxRuntimeMs = 0
 } = {}) {
   return new Promise((resolve) => {
-    const args = buildClaudeArgs({ edit, resumeId, model, effort });
+    const args = buildClaudeArgs({ edit, resumeId, model, effort, fallbackModel });
 
     let child;
     try {
@@ -102,6 +108,7 @@ export function runClaude({
 
     const state = {
       sessionId: null,
+      model: null,
       resultText: "",
       isError: false,
       subtype: null,
@@ -145,6 +152,10 @@ export function runClaude({
         case "system":
           if (evt.session_id) {
             state.sessionId = evt.session_id;
+          }
+          if (evt.model) {
+            // the model that actually serves the run (visible fallback)
+            state.model = evt.model;
           }
           break;
         case "assistant": {
@@ -210,6 +221,7 @@ export function runClaude({
         ok: code === 0 && !state.isError && !state.maxRuntimeExceeded,
         exitCode: code,
         sessionId: state.sessionId,
+        model: state.model,
         result: state.resultText,
         isError: state.isError || state.maxRuntimeExceeded,
         subtype: state.maxRuntimeExceeded ? "max_runtime_exceeded" : state.subtype,

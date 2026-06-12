@@ -150,14 +150,17 @@ Have opus review this design.                        → model: opus
 ```
 
 Mention it and Codex passes it through (`--model` accepts aliases like
-`sonnet`/`opus` or full names; `--effort` is `low`…`max`). When you don't,
-defaults apply in this order: plugin settings, then your own Claude
-configuration. To set plugin-level defaults, add to
+`sonnet`/`opus`/`fable` or full names; `--effort` is `low`…`max`). When you
+don't, the default model is **`fable`** — the newest Claude — with automatic
+fallback to `sonnet` when a plan can't serve it. The result's meta line shows
+which model actually answered. To change the default, add to
 `~/.config/cc-plugin-codex/settings.json`:
 
 ```json
-{ "model": "sonnet", "effort": "medium" }
+{ "model": "opus", "effort": "medium" }
 ```
+
+Set `"model": "inherit"` to defer to your own Claude configuration instead.
 
 ## Verification policy
 

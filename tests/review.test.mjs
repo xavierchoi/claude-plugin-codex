@@ -118,11 +118,13 @@ test("model/effort: per-call args win, settings provide defaults, invalid effort
     assert.ok(c.argv.includes("--model") && c.argv.includes("sonnet"), `argv: ${c.argv.join(" ")}`);
     assert.ok(c.argv.includes("--effort") && c.argv.includes("low"));
 
-    // per-call arguments override the settings
+    // per-call arguments override the settings — and explicit choices are
+    // respected strictly: no automatic fallback model
     await s.rpc("tools/call", { name: "consult", arguments: { prompt: "hi", cwd: HOME, model: "opus", effort: "max" } });
     c = JSON.parse(fs.readFileSync(capture, "utf8"));
     assert.ok(c.argv.includes("opus") && c.argv.includes("max"));
     assert.ok(!c.argv.includes("sonnet") && !c.argv.includes("low"));
+    assert.ok(!c.argv.includes("--fallback-model"));
 
     // invalid effort → friendly error, no run
     const bad = await s.rpc("tools/call", { name: "consult", arguments: { prompt: "hi", cwd: HOME, effort: "extreme" } });
@@ -133,7 +135,7 @@ test("model/effort: per-call args win, settings provide defaults, invalid effort
   }
 });
 
-test("model/effort omitted everywhere → no flags (Claude's own default applies)", async () => {
+test("model omitted everywhere → built-in default: fable with sonnet fallback", async () => {
   const HOME = makeTempHome();
   const capture = path.join(HOME, "capture.json");
   const s = startServer(fakeClaudeEnv(HOME, { FAKE_CLAUDE_CAPTURE: capture }));
@@ -141,7 +143,36 @@ test("model/effort omitted everywhere → no flags (Claude's own default applies
     await initialized(s);
     await s.rpc("tools/call", { name: "consult", arguments: { prompt: "hi", cwd: HOME } });
     const c = JSON.parse(fs.readFileSync(capture, "utf8"));
-    assert.ok(!c.argv.includes("--model") && !c.argv.includes("--effort"), `argv: ${c.argv.join(" ")}`);
+    assert.ok(c.argv.includes("--model") && c.argv.includes("fable"), `argv: ${c.argv.join(" ")}`);
+    assert.ok(c.argv.includes("--fallback-model") && c.argv.includes("sonnet"));
+    assert.ok(!c.argv.includes("--effort"), "no effort default — Claude decides");
+  } finally {
+    s.stop();
+  }
+});
+
+test("model 'inherit' → no model flags at all (the user's Claude config decides)", async () => {
+  const HOME = makeTempHome();
+  const capture = path.join(HOME, "capture.json");
+  const s = startServer(fakeClaudeEnv(HOME, { FAKE_CLAUDE_CAPTURE: capture }));
+  try {
+    await initialized(s);
+    await s.rpc("tools/call", { name: "consult", arguments: { prompt: "hi", cwd: HOME, model: "inherit" } });
+    const c = JSON.parse(fs.readFileSync(capture, "utf8"));
+    assert.ok(!c.argv.includes("--model") && !c.argv.includes("--fallback-model"), `argv: ${c.argv.join(" ")}`);
+
+    // …and via settings too
+    const settingsFile = path.join(HOME, "settings2.json");
+    fs.writeFileSync(settingsFile, JSON.stringify({ model: "inherit" }));
+    const s2 = startServer(fakeClaudeEnv(HOME, { FAKE_CLAUDE_CAPTURE: capture, CC_PLUGIN_CODEX_SETTINGS: settingsFile }));
+    try {
+      await initialized(s2);
+      await s2.rpc("tools/call", { name: "consult", arguments: { prompt: "hi", cwd: HOME } });
+      const c2 = JSON.parse(fs.readFileSync(capture, "utf8"));
+      assert.ok(!c2.argv.includes("--model") && !c2.argv.includes("--fallback-model"));
+    } finally {
+      s2.stop();
+    }
   } finally {
     s.stop();
   }

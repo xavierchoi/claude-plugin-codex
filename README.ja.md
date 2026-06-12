@@ -150,15 +150,18 @@ Claude にざっと安く見てもらって。                  → effort: low
 opus にこの設計をレビューしてもらって。            → model: opus
 ```
 
-伝えれば Codex がそのまま渡します（`--model` は `sonnet`/`opus` などの
-エイリアスまたはフルネーム、`--effort` は `low`…`max`）。伝えなければ、
-デフォルトがこの順で適用されます: プラグイン設定 → ユーザー自身の Claude
-設定。プラグインレベルのデフォルトは
+伝えれば Codex がそのまま渡します（`--model` は `sonnet`/`opus`/`fable`
+などのエイリアスまたはフルネーム、`--effort` は `low`…`max`）。伝えなければ
+デフォルトのモデルは **`fable`** — 最新の Claude — で、プランで利用できない
+場合は自動的に `sonnet` へフォールバックします。実際にどのモデルが答えたかは
+結果のメタ行に表示されます。デフォルトを変えるには
 `~/.config/cc-plugin-codex/settings.json` に追加してください:
 
 ```json
-{ "model": "sonnet", "effort": "medium" }
+{ "model": "opus", "effort": "medium" }
 ```
+
+`"model": "inherit"` を設定すると、ユーザー自身の Claude 設定に従います。
 
 ## verify ポリシー
 

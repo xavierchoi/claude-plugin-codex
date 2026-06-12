@@ -64,12 +64,13 @@ request into the right call yourself:
 - **resume** → `true` when the request is a follow-up to what Claude just did
   in this directory — "have Claude refine that", "ask it to also fix X",
   "continue where Claude left off". A fresh, unrelated task → omit it.
-- **model / effort** → omit both unless the user signals a preference; the
-  defaults (plugin settings, else the user's own Claude configuration) are
-  usually right. "quick / cheap / rough pass" → `effort: "low"`. "think hard /
-  be thorough / tricky problem" → `effort: "high"` (or `"max"` for the
-  hardest). A named model ("use opus", "with sonnet") → pass it through as
-  `model`.
+- **model / effort** → omit both unless the user signals a preference. The
+  default model is `fable` (the newest Claude, with automatic fallback to
+  `sonnet` if their plan can't serve it) — usually right. "quick / cheap /
+  rough pass" → `effort: "low"`. "think hard / be thorough / tricky problem" →
+  `effort: "high"` (or `"max"` for the hardest). A named model ("use opus",
+  "with sonnet") → pass it through as `model`; "use my own Claude default" →
+  `model: "inherit"`.
 - **verify** → for any **edit** task, pass `verify: "auto"` — the server runs a
   syntax check on whatever files Claude touched (you don't need to know the
   command). Use an explicit command only when the user names a check ("make sure

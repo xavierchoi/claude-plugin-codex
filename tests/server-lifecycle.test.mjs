@@ -34,8 +34,9 @@ test("foreground consult: renders result, log pointer, cost", async () => {
     assert.match(t, /echo:say hello/);
     assert.match(t, /📋 Progress log:/);
     // OAuth-login runs are plan usage, not a separate bill — and the meta line
-    // carries a duration
+    // carries the serving model and a duration
     assert.match(t, /≈\$0\.0100 of plan usage/);
+    assert.match(t, /\( fake-model · /);
     assert.match(t, /· \d+m?\d*s ·/);
   } finally {
     s.stop();

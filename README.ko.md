@@ -147,14 +147,18 @@ Claude한테 빠르고 가볍게 한번 봐 달라고 해 줘.      → effort: 
 opus로 이 설계 리뷰해 줘.                            → model: opus
 ```
 
-말하면 Codex가 그대로 전달합니다(`--model`은 `sonnet`/`opus` 같은 별칭이나
-전체 이름, `--effort`는 `low`…`max`). 말하지 않으면 기본값이 이 순서로
-적용됩니다: 플러그인 설정 → 사용자의 Claude 자체 설정. 플러그인 수준
-기본값은 `~/.config/cc-plugin-codex/settings.json`에 추가하세요:
+말하면 Codex가 그대로 전달합니다(`--model`은 `sonnet`/`opus`/`fable` 같은
+별칭이나 전체 이름, `--effort`는 `low`…`max`). 말하지 않으면 기본 모델은
+**`fable`** — 최신 Claude — 이고, 플랜에서 사용할 수 없으면 `sonnet`으로
+자동 폴백됩니다. 실제로 어떤 모델이 답했는지는 결과의 메타 라인에
+표시됩니다. 기본값을 바꾸려면 `~/.config/cc-plugin-codex/settings.json`에
+추가하세요:
 
 ```json
-{ "model": "sonnet", "effort": "medium" }
+{ "model": "opus", "effort": "medium" }
 ```
+
+`"model": "inherit"`로 설정하면 사용자의 Claude 자체 설정을 따릅니다.
 
 ## verify 정책
 

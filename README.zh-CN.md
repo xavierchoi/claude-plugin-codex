@@ -142,14 +142,17 @@ Claude 运行时带着你在 Claude Code 中安装的技能：
 用 opus 评审这个设计。                      → model: opus
 ```
 
-只要说出来，Codex 就会原样传递（`--model` 接受 `sonnet`/`opus` 等别名或
-完整名称；`--effort` 为 `low`…`max`）。不指定时，默认值按此顺序生效：
-插件设置 → 你自己的 Claude 配置。插件级默认值可写入
+只要说出来，Codex 就会原样传递（`--model` 接受 `sonnet`/`opus`/`fable` 等
+别名或完整名称；`--effort` 为 `low`…`max`）。不指定时，默认模型为
+**`fable`** —— 最新的 Claude —— 若套餐无法使用则自动回退到 `sonnet`。
+结果的元信息行会显示实际作答的模型。要更改默认值，请写入
 `~/.config/cc-plugin-codex/settings.json`：
 
 ```json
-{ "model": "sonnet", "effort": "medium" }
+{ "model": "opus", "effort": "medium" }
 ```
+
+设置 `"model": "inherit"` 则沿用你自己的 Claude 配置。
 
 ## verify 策略
 

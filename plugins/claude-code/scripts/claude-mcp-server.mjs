@@ -26,10 +26,19 @@ import { loadSettings } from "./lib/settings.mjs";
 import { collectDiff } from "./lib/git-diff.mjs";
 
 const SERVER_NAME = "claude-code";
-const SERVER_VERSION = "0.10.0";
+const SERVER_VERSION = "0.11.0";
 
 // claude CLI's --effort levels (claude --help).
 const EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
+
+// Default model: the newest Claude — the second opinion people install this
+// for. Applied only when neither the call nor the settings pick a model, and
+// always paired with a fallback so plans without access to the newest model
+// degrade gracefully instead of erroring. `"inherit"` (per call or in
+// settings) defers to the user's own Claude configuration.
+const DEFAULT_MODEL = "fable";
+const DEFAULT_FALLBACK_MODEL = "sonnet";
+const INHERIT_MODEL = "inherit";
 // Versions this server actually implements. If the client asks for something
 // else, answer with the latest one we support (per the MCP spec) instead of
 // echoing an arbitrary string back.
@@ -101,7 +110,7 @@ const CONSULT_TOOL = {
       model: {
         type: "string",
         description:
-          "Optional Claude model. Accepts an alias ('sonnet', 'opus', 'fable') or a full model name. Default: the plugin settings' model, else the user's own Claude default — omit unless the user asks for a specific or cheaper/stronger model."
+          "Optional Claude model: an alias ('sonnet', 'opus', 'fable') or a full model name. Default: 'fable' (the newest Claude, with automatic fallback to 'sonnet' if unavailable) unless the plugin settings say otherwise. Pass 'inherit' to use the user's own Claude configuration. Omit unless the user asks for a specific or cheaper model."
       },
       effort: {
         type: "string",
@@ -268,6 +277,11 @@ function renderResult(run, { taskCwd, edit, usedResume }) {
   }
 
   const meta = [];
+  if (run.model) {
+    // the model that actually served the run — makes the default (and any
+    // automatic fallback) visible
+    meta.push(run.model);
+  }
   if (run.numTurns != null) {
     meta.push(`${run.numTurns} turn${run.numTurns === 1 ? "" : "s"}`);
   }
@@ -311,11 +325,21 @@ function parseConsultArgs(args) {
   }
   const edit = Boolean(args?.edit);
 
-  // Per-call argument > plugin settings default > Claude's own default.
+  // Per-call argument > plugin settings > built-in default (fable, with an
+  // automatic fallback). "inherit" at any level → no flags, Claude's own
+  // configuration decides.
   const settings = loadSettings();
-  const model =
+  const chosen =
     (typeof args?.model === "string" && args.model.trim() ? args.model.trim() : null) ??
     (typeof settings.model === "string" && settings.model.trim() ? settings.model.trim() : null);
+  let model;
+  let fallbackModel = null;
+  if (chosen) {
+    model = chosen.toLowerCase() === INHERIT_MODEL ? null : chosen;
+  } else {
+    model = DEFAULT_MODEL;
+    fallbackModel = DEFAULT_FALLBACK_MODEL;
+  }
   const effortArg = typeof args?.effort === "string" ? args.effort.trim().toLowerCase() : "";
   if (effortArg && !EFFORT_LEVELS.has(effortArg)) {
     return { error: `Unknown effort \`${args.effort}\` — use one of: low, medium, high, xhigh, max.` };
@@ -325,10 +349,10 @@ function parseConsultArgs(args) {
   const resumeId = args?.resume ? getLastSession(taskCwd) : null;
   const verify = typeof args?.verify === "string" && args.verify.trim() ? args.verify.trim() : null;
   const summary = typeof args?.summary === "string" && args.summary.trim() ? args.summary.trim() : null;
-  return { prompt, taskCwd, edit, model, effort, resumeId, verify, summary };
+  return { prompt, taskCwd, edit, model, fallbackModel, effort, resumeId, verify, summary };
 }
 
-function launchBackgroundConsult({ prompt, taskCwd, edit, model, effort, resumeId, verify, summary }) {
+function launchBackgroundConsult({ prompt, taskCwd, edit, model, fallbackModel, effort, resumeId, verify, summary }) {
   const running = listJobs().filter((job) => job.status === "running").length;
   if (running >= MAX_CONCURRENT_JOBS) {
     return {
@@ -352,6 +376,7 @@ function launchBackgroundConsult({ prompt, taskCwd, edit, model, effort, resumeI
     edit,
     resumeId,
     model,
+    fallbackModel,
     effort,
     verify,
     summary: summary ?? prompt.replace(/\s+/g, " ").slice(0, 100),
@@ -397,7 +422,7 @@ async function handleConsult(args, ctx) {
   if (parsed.error) {
     return { content: [{ type: "text", text: parsed.error }], isError: true };
   }
-  const { prompt, taskCwd, edit, model, effort, resumeId, verify } = parsed;
+  const { prompt, taskCwd, edit, model, fallbackModel, effort, resumeId, verify } = parsed;
 
   if (args?.background) {
     return launchBackgroundConsult(parsed);
@@ -432,6 +457,7 @@ async function handleConsult(args, ctx) {
       edit,
       resumeId,
       model,
+      fallbackModel,
       effort,
       progress,
       ownProcessGroup: true,
@@ -727,7 +753,7 @@ function handleResultTool(args) {
 
   const durationMs = Date.parse(job.completedAt || "") - Date.parse(job.startedAt || "");
   let text = renderResult(
-    { result: r.result, sessionId: r.sessionId, touchedFiles: r.touchedFiles, numTurns: r.numTurns, costUsd: r.costUsd, durationMs },
+    { result: r.result, sessionId: r.sessionId, touchedFiles: r.touchedFiles, numTurns: r.numTurns, costUsd: r.costUsd, durationMs, model: r.model },
     { taskCwd: job.cwd, edit: job.edit, usedResume: Boolean(job.resumeId) }
   );
   if (r.verify) {
@@ -883,6 +909,7 @@ async function runWorker() {
     edit: job.edit,
     resumeId: job.resumeId,
     model: job.model,
+    fallbackModel: job.fallbackModel ?? null,
     effort: job.effort ?? null,
     progress
   });
@@ -923,6 +950,7 @@ async function runWorker() {
       costUsd: run.costUsd ?? null,
       touchedFiles: run.touchedFiles ?? [],
       sessionId: run.sessionId ?? null,
+      model: run.model ?? null,
       error: run.error ?? null,
       stderr: run.stderr ?? "",
       verify: verifyResult
