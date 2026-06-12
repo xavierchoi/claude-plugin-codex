@@ -35,7 +35,14 @@ Use the `consult` tool from the `claude-code` MCP server. Arguments:
 - `verify` — a command the server runs after the edits (e.g. `"auto"` or
   `"npm test"`); see below.
 - `resume` — continue the most recent Claude session for this directory.
-- `model` — optional model override.
+- `model` / `effort` — optional model (alias like `sonnet`/`opus` or a full
+  name) and effort level (`low`…`max`); see the inference rules below.
+
+For *"review my changes"* requests, prefer the **`review`** tool: the server
+collects the git diff itself (uncommitted changes, or everything since `base`
+when the user compares against a branch) and Claude reviews it read-only as a
+collaborative second pair of eyes. Pass `focus` when the user names a concern,
+and `background: true` for large diffs.
 
 ## Choosing the parameters — infer them, don't ask
 
@@ -57,6 +64,12 @@ request into the right call yourself:
 - **resume** → `true` when the request is a follow-up to what Claude just did
   in this directory — "have Claude refine that", "ask it to also fix X",
   "continue where Claude left off". A fresh, unrelated task → omit it.
+- **model / effort** → omit both unless the user signals a preference; the
+  defaults (plugin settings, else the user's own Claude configuration) are
+  usually right. "quick / cheap / rough pass" → `effort: "low"`. "think hard /
+  be thorough / tricky problem" → `effort: "high"` (or `"max"` for the
+  hardest). A named model ("use opus", "with sonnet") → pass it through as
+  `model`.
 - **verify** → for any **edit** task, pass `verify: "auto"` — the server runs a
   syntax check on whatever files Claude touched (you don't need to know the
   command). Use an explicit command only when the user names a check ("make sure

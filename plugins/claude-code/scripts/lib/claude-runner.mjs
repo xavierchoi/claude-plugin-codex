@@ -23,7 +23,7 @@ const KILL_ESCALATION_MS = 5000;
  * Gentle by default: without `edit`, Claude runs in plan mode (read-only,
  * advisory). With `edit`, it may accept its own file edits.
  */
-export function buildClaudeArgs({ edit, resumeId, model }) {
+export function buildClaudeArgs({ edit, resumeId, model, effort }) {
   const args = ["-p", "--output-format", "stream-json", "--verbose"];
   args.push("--permission-mode", edit ? "acceptEdits" : "plan");
   args.push("--append-system-prompt", HEADLESS_GUARDRAIL);
@@ -32,6 +32,9 @@ export function buildClaudeArgs({ edit, resumeId, model }) {
   }
   if (model) {
     args.push("--model", model);
+  }
+  if (effort) {
+    args.push("--effort", effort);
   }
   return args;
 }
@@ -64,6 +67,7 @@ export function runClaude({
   edit = false,
   resumeId = null,
   model = null,
+  effort = null,
   onEvent,
   progress,
   onChild,
@@ -71,7 +75,7 @@ export function runClaude({
   maxRuntimeMs = 0
 } = {}) {
   return new Promise((resolve) => {
-    const args = buildClaudeArgs({ edit, resumeId, model });
+    const args = buildClaudeArgs({ edit, resumeId, model, effort });
 
     let child;
     try {

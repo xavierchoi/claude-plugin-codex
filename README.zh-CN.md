@@ -31,9 +31,10 @@ codex ▸ 🤝 Claude Code made changes in ~/projects/site.
 
 ## 你将获得
 
-一个 `claude-code` MCP 服务器（Node 编写，零依赖），提供五个工具：
+一个 `claude-code` MCP 服务器（Node 编写，零依赖），提供六个工具：
 
 - `consult` —— 把任务交给 Claude Code，默认仅提供建议
+- `review` —— 对未提交改动或分支进行细致的只读评审
 - `consult_status` / `consult_result` / `consult_cancel` —— 管理后台任务
 - `setup` —— 检查 Claude Code 是否已安装并登录
 
@@ -78,6 +79,17 @@ codex plugin add claude-code@claude-plugin-codex
 
 默认情况下 Claude 以 plan mode 运行：只调查、只建议，不触碰任何文件。
 
+### 请求代码评审
+
+```text
+让 Claude 评审一下我的改动。
+让 Claude 以 main 为基准评审这个分支 —— 重点看重试逻辑。
+```
+
+服务器会自行收集 git diff（未提交的改动，或自 base 分支以来的全部变更），
+Claude 以只读方式进行评审：简短摘要、做得好的地方、按严重程度排列的发现
+（附 file:line 引用），以及一个坦诚的总体结论。
+
 ### 让 Claude 动手修改
 
 ```text
@@ -120,6 +132,23 @@ Claude 运行时带着你在 Claude Code 中安装的技能：
 
 ```text
 让 Claude 用 frontend-design 技能重新设计这个页面。
+```
+
+### 选择模型与 effort
+
+```text
+让 Claude 快速、省钱地看一眼。              → effort: low
+这个竞态条件让 Claude 好好想想。            → effort: high
+用 opus 评审这个设计。                      → model: opus
+```
+
+只要说出来，Codex 就会原样传递（`--model` 接受 `sonnet`/`opus` 等别名或
+完整名称；`--effort` 为 `low`…`max`）。不指定时，默认值按此顺序生效：
+插件设置 → 你自己的 Claude 配置。插件级默认值可写入
+`~/.config/cc-plugin-codex/settings.json`：
+
+```json
+{ "model": "sonnet", "effort": "medium" }
 ```
 
 ## verify 策略

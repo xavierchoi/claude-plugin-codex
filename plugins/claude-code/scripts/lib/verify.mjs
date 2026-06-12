@@ -1,9 +1,7 @@
 import { spawn } from "node:child_process";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 
 import { terminateProcessTree, killProcessTreeHard } from "./process.mjs";
+import { SETTINGS_FILE, loadSettings } from "./settings.mjs";
 
 // Run a caller-supplied verification command AFTER Claude finishes, from the
 // MCP server (which has no approval gate). This closes the headless gap where
@@ -21,10 +19,6 @@ const KILL_ESCALATION_MS = 5000;
 // injection in the repo an unsandboxed shell. Default policy "safe" allows
 // `"auto"` plus plain invocations of well-known dev tools (no shell
 // operators). Users can relax or tighten this in the settings file.
-const SETTINGS_FILE =
-  process.env.CC_PLUGIN_CODEX_SETTINGS ||
-  path.join(os.homedir(), ".config", "cc-plugin-codex", "settings.json");
-
 const VERIFY_POLICIES = new Set(["auto-only", "safe", "all"]);
 
 // Plain dev tools considered safe to invoke directly (no shell metacharacters
@@ -37,15 +31,8 @@ const SAFE_VERIFY_TOOLS = new Set([
 ]);
 
 function loadVerifyPolicy() {
-  try {
-    const settings = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8"));
-    if (VERIFY_POLICIES.has(settings?.verify)) {
-      return settings.verify;
-    }
-  } catch {
-    // no settings file → default
-  }
-  return "safe";
+  const settings = loadSettings();
+  return VERIFY_POLICIES.has(settings?.verify) ? settings.verify : "safe";
 }
 
 // Decide whether an EXPLICIT verify command (anything but "auto") may run.

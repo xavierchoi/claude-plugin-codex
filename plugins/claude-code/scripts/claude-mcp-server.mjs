@@ -22,9 +22,14 @@ import { openProgressLog, progressLogPath } from "./lib/progress-log.mjs";
 import { generateJobId, listJobs, nowIso, pruneJobs, readJob, updateJob, writeJob } from "./lib/jobs.mjs";
 import { terminateProcessTree } from "./lib/process.mjs";
 import { runVerify, renderVerify } from "./lib/verify.mjs";
+import { loadSettings } from "./lib/settings.mjs";
+import { collectDiff } from "./lib/git-diff.mjs";
 
 const SERVER_NAME = "claude-code";
-const SERVER_VERSION = "0.9.0";
+const SERVER_VERSION = "0.10.0";
+
+// claude CLI's --effort levels (claude --help).
+const EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
 // Versions this server actually implements. If the client asks for something
 // else, answer with the latest one we support (per the MCP spec) instead of
 // echoing an arbitrary string back.
@@ -95,7 +100,14 @@ const CONSULT_TOOL = {
       },
       model: {
         type: "string",
-        description: "Optional Claude model override, e.g. claude-sonnet-4-6."
+        description:
+          "Optional Claude model. Accepts an alias ('sonnet', 'opus', 'fable') or a full model name. Default: the plugin settings' model, else the user's own Claude default — omit unless the user asks for a specific or cheaper/stronger model."
+      },
+      effort: {
+        type: "string",
+        enum: ["low", "medium", "high", "xhigh", "max"],
+        description:
+          "Optional effort level for the run. 'low' = quick and cheap, 'high'/'xhigh'/'max' = deeper work on hard problems. Default: the plugin settings' effort, else Claude's default — omit unless the user signals speed or depth."
       },
       background: {
         type: "boolean",
@@ -172,7 +184,42 @@ const CANCEL_TOOL = {
   }
 };
 
-const TOOLS = [CONSULT_TOOL, SETUP_TOOL, STATUS_TOOL, RESULT_TOOL, CANCEL_TOOL];
+const REVIEW_TOOL = {
+  name: "review",
+  description:
+    "Have Claude Code review the changes in a repository — a careful, collaborative second pair of eyes (read-only, never edits). Reviews the uncommitted changes by default, or everything since a base ref (e.g. 'main') when comparing a branch. The server collects the git diff itself; Claude reads surrounding code for context and reports findings by severity with file:line references. Use background=true for large diffs and poll consult_status / consult_result.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      cwd: {
+        type: "string",
+        description: "Absolute path to the repository to review. Required — it cannot be inferred."
+      },
+      base: {
+        type: "string",
+        description: "Optional base ref (e.g. 'main'): review everything since its merge-base with HEAD instead of just uncommitted changes."
+      },
+      focus: {
+        type: "string",
+        description: "Optional focus — what the user is worried about (e.g. 'the retry logic', 'error handling in the new endpoints')."
+      },
+      model: { type: "string", description: "Optional Claude model (alias like 'sonnet'/'opus' or full name)." },
+      effort: {
+        type: "string",
+        enum: ["low", "medium", "high", "xhigh", "max"],
+        description: "Optional effort level — 'high' for a deep review of risky changes, 'low' for a quick pass."
+      },
+      background: {
+        type: "boolean",
+        description: "Run as a background job (recommended for large diffs). Returns a job id; poll consult_status / consult_result."
+      }
+    },
+    required: ["cwd"],
+    additionalProperties: false
+  }
+};
+
+const TOOLS = [CONSULT_TOOL, REVIEW_TOOL, SETUP_TOOL, STATUS_TOOL, RESULT_TOOL, CANCEL_TOOL];
 
 function resolveTaskCwd(rawCwd) {
   if (typeof rawCwd === "string" && rawCwd.trim()) {
@@ -263,13 +310,25 @@ function parseConsultArgs(args) {
     return { error: cwdError };
   }
   const edit = Boolean(args?.edit);
-  const model = typeof args?.model === "string" && args.model.trim() ? args.model.trim() : null;
+
+  // Per-call argument > plugin settings default > Claude's own default.
+  const settings = loadSettings();
+  const model =
+    (typeof args?.model === "string" && args.model.trim() ? args.model.trim() : null) ??
+    (typeof settings.model === "string" && settings.model.trim() ? settings.model.trim() : null);
+  const effortArg = typeof args?.effort === "string" ? args.effort.trim().toLowerCase() : "";
+  if (effortArg && !EFFORT_LEVELS.has(effortArg)) {
+    return { error: `Unknown effort \`${args.effort}\` — use one of: low, medium, high, xhigh, max.` };
+  }
+  const effort = effortArg || (EFFORT_LEVELS.has(settings.effort) ? settings.effort : null);
+
   const resumeId = args?.resume ? getLastSession(taskCwd) : null;
   const verify = typeof args?.verify === "string" && args.verify.trim() ? args.verify.trim() : null;
-  return { prompt, taskCwd, edit, model, resumeId, verify };
+  const summary = typeof args?.summary === "string" && args.summary.trim() ? args.summary.trim() : null;
+  return { prompt, taskCwd, edit, model, effort, resumeId, verify, summary };
 }
 
-function launchBackgroundConsult({ prompt, taskCwd, edit, model, resumeId, verify }) {
+function launchBackgroundConsult({ prompt, taskCwd, edit, model, effort, resumeId, verify, summary }) {
   const running = listJobs().filter((job) => job.status === "running").length;
   if (running >= MAX_CONCURRENT_JOBS) {
     return {
@@ -293,8 +352,9 @@ function launchBackgroundConsult({ prompt, taskCwd, edit, model, resumeId, verif
     edit,
     resumeId,
     model,
+    effort,
     verify,
-    summary: prompt.replace(/\s+/g, " ").slice(0, 100),
+    summary: summary ?? prompt.replace(/\s+/g, " ").slice(0, 100),
     startedAt: nowIso(),
     completedAt: null,
     sessionId: null,
@@ -337,7 +397,7 @@ async function handleConsult(args, ctx) {
   if (parsed.error) {
     return { content: [{ type: "text", text: parsed.error }], isError: true };
   }
-  const { prompt, taskCwd, edit, model, resumeId, verify } = parsed;
+  const { prompt, taskCwd, edit, model, effort, resumeId, verify } = parsed;
 
   if (args?.background) {
     return launchBackgroundConsult(parsed);
@@ -372,6 +432,7 @@ async function handleConsult(args, ctx) {
       edit,
       resumeId,
       model,
+      effort,
       progress,
       ownProcessGroup: true,
       maxRuntimeMs: FOREGROUND_MAX_RUNTIME_MS,
@@ -462,6 +523,87 @@ async function handleConsult(args, ctx) {
       activeForegroundRuns.delete(requestId);
     }
   }
+}
+
+function buildReviewPrompt({ stat, patch, untracked, truncated, base, focus }) {
+  const lines = [];
+  lines.push(
+    "Please review the following changes as a collaborative second pair of eyes — careful, specific, and kind."
+  );
+  lines.push("");
+  lines.push("How to review:");
+  lines.push(
+    "- Read any files you need for context (you have read access to this repository); judge the change in its surroundings, not just the patch."
+  );
+  lines.push("- Report only findings you can ground in the code — no speculation. If something is fine, say so briefly.");
+  lines.push("- Structure your reply as:");
+  lines.push("  1. A two-or-three-sentence summary of what the change does.");
+  lines.push("  2. What works well (brief).");
+  lines.push("  3. Findings ordered by severity (bug / risk / suggestion), each with file:line and a concrete suggested fix.");
+  lines.push("  4. An honest overall verdict.");
+  if (focus) {
+    lines.push("");
+    lines.push(`Pay particular attention to: ${focus}`);
+  }
+  lines.push("");
+  lines.push(base ? `Changes since the merge-base with \`${base}\`:` : "Uncommitted changes (staged + unstaged):");
+  if (stat) {
+    lines.push("", "```", stat, "```");
+  }
+  if (untracked?.length) {
+    lines.push("", "Untracked files (not in the patch — read them directly if relevant):");
+    for (const file of untracked) {
+      lines.push(`- ${file}`);
+    }
+  }
+  lines.push("", "```diff", patch, "```");
+  if (truncated) {
+    lines.push("", "(The patch was truncated for size — use your file tools in the repository for the full picture.)");
+  }
+  return lines.join("\n");
+}
+
+// Gentle code review: the server gathers the diff itself, then hands Claude a
+// read-only consult with a collaborative review prompt. Everything else —
+// cancellation, watchdogs, background jobs — is the consult machinery.
+async function handleReview(args, ctx) {
+  const { cwd: taskCwd, error: cwdError } = resolveTaskCwd(args?.cwd);
+  if (cwdError) {
+    return { content: [{ type: "text", text: cwdError }], isError: true };
+  }
+  const base = typeof args?.base === "string" && args.base.trim() ? args.base.trim() : null;
+  const focus = typeof args?.focus === "string" && args.focus.trim() ? args.focus.trim() : null;
+  log(`review: cwd=${taskCwd} base=${base ?? "working-tree"} background=${Boolean(args?.background)}`);
+
+  const diff = await collectDiff(taskCwd, base);
+  if (diff.error) {
+    return { content: [{ type: "text", text: `Nothing to review: ${diff.error}.` }], isError: true };
+  }
+  if (diff.empty) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: base
+            ? `Nothing to review — no changes since \`${base}\`.`
+            : "Nothing to review — the working tree is clean."
+        }
+      ]
+    };
+  }
+
+  return handleConsult(
+    {
+      prompt: buildReviewPrompt({ ...diff, focus }),
+      cwd: taskCwd,
+      edit: false,
+      background: Boolean(args?.background),
+      model: args?.model,
+      effort: args?.effort,
+      summary: `review (${base ? `vs ${base}` : "working tree"})${focus ? `: ${focus}` : ""}`
+    },
+    ctx
+  );
 }
 
 async function handleSetup(args) {
@@ -662,6 +804,7 @@ async function handleMessage(message) {
     case "tools/call": {
       const handlers = {
         consult: handleConsult,
+        review: handleReview,
         setup: handleSetup,
         consult_status: handleStatusTool,
         consult_result: handleResultTool,
@@ -740,6 +883,7 @@ async function runWorker() {
     edit: job.edit,
     resumeId: job.resumeId,
     model: job.model,
+    effort: job.effort ?? null,
     progress
   });
   if (timedOut) {

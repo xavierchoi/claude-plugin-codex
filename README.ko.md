@@ -32,9 +32,10 @@ codex ▸ 🤝 Claude Code made changes in ~/projects/site.
 
 ## 제공되는 것
 
-`claude-code` MCP 서버(Node, 의존성 없음)와 다섯 개의 툴:
+`claude-code` MCP 서버(Node, 의존성 없음)와 여섯 개의 툴:
 
 - `consult` — Claude Code에 작업을 맡깁니다. 기본은 조언 전용입니다
+- `review` — 커밋 전 변경사항이나 브랜치에 대한 꼼꼼한 읽기 전용 리뷰
 - `consult_status` / `consult_result` / `consult_cancel` — 백그라운드 작업 관리
 - `setup` — Claude Code 설치·로그인 상태 점검
 
@@ -81,6 +82,17 @@ codex plugin add claude-code@claude-plugin-codex
 기본적으로 Claude는 plan mode로 실행됩니다: 파일을 건드리지 않고 조사와
 조언만 합니다.
 
+### 리뷰 요청하기
+
+```text
+Claude한테 내 변경사항 리뷰 받아 줘.
+이 브랜치를 main 기준으로 Claude가 리뷰하게 해 줘 — 재시도 로직 위주로.
+```
+
+서버가 git diff를 직접 수집하고(커밋 전 변경사항, 또는 base 브랜치 이후의
+모든 변경), Claude가 읽기 전용으로 리뷰합니다: 짧은 요약, 잘된 점, 심각도별
+발견 사항(file:line 참조 포함), 그리고 솔직한 총평.
+
 ### Claude에게 수정 맡기기
 
 ```text
@@ -125,6 +137,23 @@ Claude는 사용자가 Claude Code에 설치해 둔 스킬과 함께 실행됩�
 
 ```text
 Claude한테 frontend-design 스킬로 이 페이지 리디자인하라고 해 줘.
+```
+
+### 모델·effort 고르기
+
+```text
+Claude한테 빠르고 가볍게 한번 봐 달라고 해 줘.      → effort: low
+이 레이스 컨디션은 Claude가 깊게 고민하게 해 줘.    → effort: high
+opus로 이 설계 리뷰해 줘.                            → model: opus
+```
+
+말하면 Codex가 그대로 전달합니다(`--model`은 `sonnet`/`opus` 같은 별칭이나
+전체 이름, `--effort`는 `low`…`max`). 말하지 않으면 기본값이 이 순서로
+적용됩니다: 플러그인 설정 → 사용자의 Claude 자체 설정. 플러그인 수준
+기본값은 `~/.config/cc-plugin-codex/settings.json`에 추가하세요:
+
+```json
+{ "model": "sonnet", "effort": "medium" }
 ```
 
 ## verify 정책

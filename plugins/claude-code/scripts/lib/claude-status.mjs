@@ -112,6 +112,16 @@ export async function checkClaudeReadiness({ deep = false } = {}) {
     }
   }
 
+  // Surfaced in the report (not just stderr logs, which users never see).
+  const platform = {
+    name: process.platform,
+    supported: process.platform !== "win32",
+    detail:
+      process.platform === "win32"
+        ? "Windows is not fully supported — background-job cancellation and bash-based auto-verify are unavailable"
+        : null
+  };
+
   // "unknown" login state (macOS Keychain) doesn't block readiness — consult
   // will work if the user is in fact logged in, and deep:true can confirm.
   const ready = node.available && claude.available && auth.loggedIn !== false;
@@ -132,7 +142,7 @@ export async function checkClaudeReadiness({ deep = false } = {}) {
     nextSteps.push("Optional: run setup with `deep: true` to verify the login with a quick live call.");
   }
 
-  return { ready, node, claude, auth, credentials, nextSteps };
+  return { ready, node, claude, auth, credentials, platform, nextSteps };
 }
 
 export function renderReadiness(status) {
@@ -143,6 +153,9 @@ export function renderReadiness(status) {
   lines.push(`- claude: ${status.claude.available ? status.claude.detail : `not available (${status.claude.detail})`}`);
   const loginIcon = status.auth.loggedIn === true ? "✅" : status.auth.loggedIn === null ? "❓" : "❌";
   lines.push(`- Login: ${loginIcon} ${status.auth.detail}${status.auth.verified ? " (verified)" : ""}`);
+  if (status.platform && !status.platform.supported) {
+    lines.push(`- Platform: ⚠️ ${status.platform.detail}`);
+  }
   if (status.nextSteps.length) {
     lines.push("");
     lines.push("Next steps:");

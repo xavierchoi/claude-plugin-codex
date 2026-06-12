@@ -32,9 +32,10 @@ codex ▸ 🤝 Claude Code made changes in ~/projects/site.
 
 ## 提供されるもの
 
-`claude-code` MCP サーバー（Node 製、依存関係ゼロ）と 5 つのツール:
+`claude-code` MCP サーバー（Node 製、依存関係ゼロ）と 6 つのツール:
 
 - `consult` — Claude Code にタスクを依頼します。デフォルトは助言のみです
+- `review` — 未コミットの変更やブランチへの丁寧な読み取り専用レビュー
 - `consult_status` / `consult_result` / `consult_cancel` — バックグラウンドジョブの管理
 - `setup` — Claude Code のインストールとログイン状態の確認
 
@@ -82,6 +83,17 @@ codex plugin add claude-code@claude-plugin-codex
 デフォルトでは Claude は plan mode で動きます: ファイルには触れず、調査と
 助言だけを行います。
 
+### レビューを頼む
+
+```text
+Claude に私の変更をレビューしてもらって。
+このブランチを main と比べて Claude にレビューしてもらって — リトライ処理を中心に。
+```
+
+サーバーが git diff を自分で収集し（未コミットの変更、または base ブランチ
+以降のすべて）、Claude が読み取り専用でレビューします: 短い要約、良い点、
+重要度順の指摘（file:line 付き）、そして率直な総評。
+
 ### Claude に修正を任せる
 
 ```text
@@ -128,6 +140,24 @@ Claude は、ユーザーが Claude Code にインストールしているスキ
 
 ```text
 Claude に frontend-design スキルでこのページをリデザインしてもらって。
+```
+
+### モデルと effort を選ぶ
+
+```text
+Claude にざっと安く見てもらって。                  → effort: low
+このレースコンディションは Claude にじっくり考えてもらって。 → effort: high
+opus にこの設計をレビューしてもらって。            → model: opus
+```
+
+伝えれば Codex がそのまま渡します（`--model` は `sonnet`/`opus` などの
+エイリアスまたはフルネーム、`--effort` は `low`…`max`）。伝えなければ、
+デフォルトがこの順で適用されます: プラグイン設定 → ユーザー自身の Claude
+設定。プラグインレベルのデフォルトは
+`~/.config/cc-plugin-codex/settings.json` に追加してください:
+
+```json
+{ "model": "sonnet", "effort": "medium" }
 ```
 
 ## verify ポリシー

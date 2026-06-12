@@ -5,3 +5,7 @@
 node_modules/
 __pycache__/
 *.log
+
+# macOS metadata
+._*
+.DS_Store

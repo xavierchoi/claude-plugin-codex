@@ -28,11 +28,11 @@ test("initialize: echoes a supported older protocolVersion", async () => {
   assert.equal(init.result.protocolVersion, "2024-11-05");
 });
 
-test("tools/list exposes exactly the five tools", async () => {
+test("tools/list exposes exactly the six tools", async () => {
   const tl = await server.rpc("tools/list", {});
   assert.deepEqual(
     tl.result.tools.map((t) => t.name).sort(),
-    ["consult", "consult_cancel", "consult_result", "consult_status", "setup"]
+    ["consult", "consult_cancel", "consult_result", "consult_status", "review", "setup"]
   );
 });
 

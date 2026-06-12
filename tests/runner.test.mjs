@@ -22,10 +22,11 @@ test("buildClaudeArgs: no prompt in argv; gentle plan mode by default", () => {
   const args = buildClaudeArgs({ edit: false, resumeId: null, model: null });
   assert.ok(!args.some((a) => a.includes("hello")), "prompt must not appear in argv");
   assert.ok(args.includes("plan"));
-  const editArgs = buildClaudeArgs({ edit: true, resumeId: "sess-9", model: "some-model" });
+  const editArgs = buildClaudeArgs({ edit: true, resumeId: "sess-9", model: "some-model", effort: "xhigh" });
   assert.ok(editArgs.includes("acceptEdits"));
   assert.ok(editArgs.includes("--resume") && editArgs.includes("sess-9"));
   assert.ok(editArgs.includes("--model") && editArgs.includes("some-model"));
+  assert.ok(editArgs.includes("--effort") && editArgs.includes("xhigh"));
 });
 
 test("parses the stream: session id, result text, turns, cost", async () => {

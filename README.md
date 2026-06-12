@@ -32,9 +32,10 @@ codex ▸ 🤝 Claude Code made changes in ~/projects/site.
 
 ## What You Get
 
-A `claude-code` MCP server (Node, zero dependencies) with five tools:
+A `claude-code` MCP server (Node, zero dependencies) with six tools:
 
 - `consult` — hand a task to Claude Code, advisory by default
+- `review` — a careful, read-only review of your uncommitted changes or branch
 - `consult_status` / `consult_result` / `consult_cancel` — manage background jobs
 - `setup` — check that Claude Code is installed and signed in
 
@@ -81,6 +82,18 @@ Ask Claude why this query is slow.
 By default Claude runs in plan mode: it investigates and advises without
 touching files.
 
+### Ask for a review
+
+```text
+Have Claude review my changes.
+Have Claude review this branch against main — focus on the retry logic.
+```
+
+The server collects the git diff itself — your uncommitted changes, or
+everything since a base branch — and Claude reviews it read-only: a short
+summary, what works well, findings by severity with file:line references,
+and an honest verdict.
+
 ### Let Claude make changes
 
 ```text
@@ -126,6 +139,24 @@ Claude runs with the skills you have installed in Claude Code:
 
 ```text
 Have Claude use the frontend-design skill to redesign this page.
+```
+
+### Choose model and effort
+
+```text
+Have Claude take a quick, cheap look at this.        → effort: low
+Ask Claude to think hard about this race condition.  → effort: high
+Have opus review this design.                        → model: opus
+```
+
+Mention it and Codex passes it through (`--model` accepts aliases like
+`sonnet`/`opus` or full names; `--effort` is `low`…`max`). When you don't,
+defaults apply in this order: plugin settings, then your own Claude
+configuration. To set plugin-level defaults, add to
+`~/.config/cc-plugin-codex/settings.json`:
+
+```json
+{ "model": "sonnet", "effort": "medium" }
 ```
 
 ## Verification policy

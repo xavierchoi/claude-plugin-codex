@@ -81,6 +81,19 @@ test("deep:true verifies the login with a live (fake) call", async () => {
   }
 });
 
+test("readiness report carries the platform; render warns on Windows", async () => {
+  const status = await checkClaudeReadiness();
+  assert.equal(status.platform.supported, process.platform !== "win32");
+  const win = renderReadiness({
+    ...status,
+    platform: { name: "win32", supported: false, detail: "Windows is not fully supported — background-job cancellation and bash-based auto-verify are unavailable" }
+  });
+  assert.match(win, /Platform: ⚠️ Windows is not fully supported/);
+  if (process.platform === "linux") {
+    assert.ok(!renderReadiness(status).includes("Platform:"), "no platform line on supported OSes");
+  }
+});
+
 test("renderReadiness shows ❓ for the unknown (tri-state) login", () => {
   const rendered = renderReadiness({
     ready: true,
