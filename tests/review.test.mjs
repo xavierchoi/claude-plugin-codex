@@ -97,6 +97,7 @@ test("review tool: clean tree and non-repo answer without spawning Claude", asyn
     const notRepo = await s.rpc("tools/call", { name: "review", arguments: { cwd: HOME } });
     assert.equal(notRepo.result.isError, true);
     assert.match(text(notRepo), /Nothing to review/);
+    assert.match(text(notRepo), /call the `consult` tool .*review the relevant files directly/, "the non-git error must prescribe the consult fallback");
     assert.equal(fs.existsSync(capture), false, "no claude run for nothing-to-review paths");
   } finally {
     s.stop();

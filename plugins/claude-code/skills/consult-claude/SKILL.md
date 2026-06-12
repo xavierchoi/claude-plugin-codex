@@ -42,7 +42,12 @@ For *"review my changes"* requests, prefer the **`review`** tool: the server
 collects the git diff itself (uncommitted changes, or everything since `base`
 when the user compares against a branch) and Claude reviews it read-only as a
 collaborative second pair of eyes. Pass `focus` when the user names a concern,
-and `background: true` for large diffs.
+and `background: true` for large diffs. If the directory isn't a git
+repository, fall back to `consult` (read-only) and ask Claude to read and
+review the relevant files directly.
+
+Read-only runs may mention that Claude kept working notes outside the
+repository (its plan file) — that's normal and means no repo files changed.
 
 ## Choosing the parameters — infer them, don't ask
 

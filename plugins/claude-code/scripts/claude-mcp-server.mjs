@@ -26,7 +26,7 @@ import { loadSettings } from "./lib/settings.mjs";
 import { collectDiff } from "./lib/git-diff.mjs";
 
 const SERVER_NAME = "claude-code";
-const SERVER_VERSION = "0.11.1";
+const SERVER_VERSION = "0.11.2";
 
 // claude CLI's --effort levels (claude --help).
 const EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
@@ -232,6 +232,19 @@ const REVIEW_TOOL = {
 
 const TOOLS = [CONSULT_TOOL, REVIEW_TOOL, SETUP_TOOL, STATUS_TOOL, RESULT_TOOL, CANCEL_TOOL];
 
+// Separate files inside the task directory from artifacts written elsewhere
+// (Claude's plan file, notes, …) — only the former are repo changes.
+function splitTouchedFiles(touchedFiles, taskCwd) {
+  const inRepo = [];
+  const external = [];
+  const root = path.resolve(taskCwd) + path.sep;
+  for (const file of touchedFiles ?? []) {
+    const resolved = path.resolve(taskCwd, String(file));
+    (resolved.startsWith(root) ? inRepo : external).push(file);
+  }
+  return { inRepo, external };
+}
+
 function resolveTaskCwd(rawCwd) {
   if (typeof rawCwd === "string" && rawCwd.trim()) {
     const resolved = path.resolve(rawCwd.trim());
@@ -276,6 +289,20 @@ function renderResult(run, { taskCwd, edit, usedResume }) {
   } else if (edit) {
     lines.push("");
     lines.push("Claude did not modify any files.");
+  }
+
+  // Writes outside the repository (e.g. Claude's own plan file in
+  // ~/.claude/plans/) are working notes, not changes — reported separately so
+  // a read-only run never looks like it modified something.
+  if (run.externalFiles?.length) {
+    const sample = run.externalFiles[0];
+    const where = run.externalFiles.length === 1 ? sample : `${sample} (+${run.externalFiles.length - 1} more)`;
+    lines.push("");
+    lines.push(
+      run.touchedFiles?.length
+        ? `(Claude also kept working notes outside the repository: ${where}.)`
+        : `(Claude kept its working notes outside the repository — ${where} — no repository files were modified.)`
+    );
   }
 
   const meta = [];
@@ -505,11 +532,13 @@ async function handleConsult(args, ctx) {
       };
     }
 
+    const { inRepo: touchedInRepo, external: externalFiles } = splitTouchedFiles(run.touchedFiles, taskCwd);
+
     // Claude ran — optionally verify its edits from the server (no approval gate).
     let verifyResult = null;
     if (verify) {
       progress.write(`running verification: ${verify}`);
-      verifyResult = await runVerify(taskCwd, verify, run.touchedFiles, {
+      verifyResult = await runVerify(taskCwd, verify, touchedInRepo, {
         onChild: (child) => {
           childPid = child.pid ?? null;
           if (tracker.cancelled) {
@@ -530,7 +559,7 @@ async function handleConsult(args, ctx) {
       setLastSession(taskCwd, run.sessionId);
     }
 
-    let text = renderResult(run, { taskCwd, edit, usedResume: Boolean(resumeId) });
+    let text = renderResult({ ...run, touchedFiles: touchedInRepo, externalFiles }, { taskCwd, edit, usedResume: Boolean(resumeId) });
     if (verifyResult) {
       text += renderVerify(verifyResult);
     }
@@ -605,7 +634,10 @@ async function handleReview(args, ctx) {
 
   const diff = await collectDiff(taskCwd, base);
   if (diff.error) {
-    return { content: [{ type: "text", text: `Nothing to review: ${diff.error}.` }], isError: true };
+    const fallback = /not inside a git repository/.test(diff.error)
+      ? " You can still get a review: call the `consult` tool (read-only) and ask Claude to read and review the relevant files directly."
+      : "";
+    return { content: [{ type: "text", text: `Nothing to review: ${diff.error}.${fallback}` }], isError: true };
   }
   if (diff.empty) {
     return {
@@ -755,7 +787,7 @@ function handleResultTool(args) {
 
   const durationMs = Date.parse(job.completedAt || "") - Date.parse(job.startedAt || "");
   let text = renderResult(
-    { result: r.result, sessionId: r.sessionId, touchedFiles: r.touchedFiles, numTurns: r.numTurns, costUsd: r.costUsd, durationMs, model: r.model },
+    { result: r.result, sessionId: r.sessionId, touchedFiles: r.touchedFiles, externalFiles: r.externalFiles, numTurns: r.numTurns, costUsd: r.costUsd, durationMs, model: r.model },
     { taskCwd: job.cwd, edit: job.edit, usedResume: Boolean(job.resumeId) }
   );
   if (r.verify) {
@@ -918,12 +950,13 @@ async function runWorker() {
   if (timedOut) {
     return;
   }
+  const { inRepo: touchedInRepo, external: externalFiles } = splitTouchedFiles(run.touchedFiles, job.cwd);
   let verifyResult = null;
   if (job.verify) {
     progress.write(`running verification: ${job.verify}`);
     // The verify shell is its own group (so its timeout can group-kill it);
     // record its pid so cancel/cleanup/watchdog can reach it too.
-    verifyResult = await runVerify(job.cwd, job.verify, run.touchedFiles, {
+    verifyResult = await runVerify(job.cwd, job.verify, touchedInRepo, {
       onChild: (child) => {
         verifyPid = child.pid ?? null;
         updateJob(jobId, { verifyPid });
@@ -950,7 +983,8 @@ async function runWorker() {
       subtype: run.subtype ?? null,
       numTurns: run.numTurns ?? null,
       costUsd: run.costUsd ?? null,
-      touchedFiles: run.touchedFiles ?? [],
+      touchedFiles: touchedInRepo,
+      externalFiles,
       sessionId: run.sessionId ?? null,
       model: run.model ?? null,
       error: run.error ?? null,

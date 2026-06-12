@@ -63,6 +63,32 @@ test("edit + verify:auto: touched files listed, syntax check runs", async () => 
   }
 });
 
+test("plan-file writes outside the repo are working notes, not touched files", async () => {
+  const HOME = makeTempHome();
+  const work = fs.mkdtempSync(path.join(HOME, "wd-"));
+  const s = startServer(fakeClaudeEnv(HOME));
+  try {
+    await initialized(s);
+    // read-only consult where (fake) plan mode writes ~/.claude/plans/fake-plan.md
+    const r = await s.rpc("tools/call", { name: "consult", arguments: { prompt: "please TOUCH_PLAN", cwd: work, verify: "auto" } });
+    const t = text(r);
+    assert.ok(!t.includes("Files Claude touched"), "a read-only run must not look like it modified files");
+    assert.match(t, /working notes outside the repository/);
+    assert.match(t, /no repository files were modified/);
+    assert.match(t, /Verification skipped/, "the plan file must not become a verify target");
+
+    // mixed: a real repo edit AND a plan note — list the edit, mention the note
+    const r2 = await s.rpc("tools/call", { name: "consult", arguments: { prompt: "TOUCH_FILE and TOUCH_PLAN", cwd: work, edit: true } });
+    const t2 = text(r2);
+    assert.match(t2, /Files Claude touched:/);
+    assert.match(t2, /fake-touched\.py/);
+    assert.ok(!/^- .*fake-plan\.md/m.test(t2), "the plan file must not be a touched-list item");
+    assert.match(t2, /also kept working notes outside the repository/);
+  } finally {
+    s.stop();
+  }
+});
+
 test("resume: second consult passes --resume with the stored session id", async () => {
   const HOME = makeTempHome();
   const capture = path.join(HOME, "capture.json");

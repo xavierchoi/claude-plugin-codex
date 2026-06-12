@@ -4,6 +4,8 @@
 // reacts to magic markers in the prompt:
 //   SLEEP_FOREVER — emit the init event, then hang (for cancel/watchdog tests)
 //   TOUCH_FILE    — write fake-touched.py in cwd and emit a Write tool_use
+//   TOUCH_PLAN    — write a plan file under $HOME/.claude/plans (outside the
+//                   repo) and emit a Write tool_use, like plan mode does
 //   FAIL_RUN      — end with an error result
 // If FAKE_CLAUDE_CAPTURE is set, argv/prompt/cwd are recorded there so tests
 // can assert how the runner invoked us (stdin prompt, flags, --resume, …).
@@ -11,6 +13,7 @@
 // NOTE: this file is extensionless but the repo's package.json says
 // `"type": "module"`, so it must use ESM syntax.
 import fs from "node:fs";
+import path from "node:path";
 
 const argv = process.argv.slice(2);
 if (argv.includes("--version")) {
@@ -35,6 +38,13 @@ process.stdin.on("end", () => {
     if (prompt.includes("TOUCH_FILE")) {
       const p = process.cwd() + "/fake-touched.py";
       fs.writeFileSync(p, "print('hi')\n");
+      out({ type: "assistant", message: { content: [{ type: "tool_use", name: "Write", input: { file_path: p } }] } });
+    }
+    if (prompt.includes("TOUCH_PLAN")) {
+      const dir = path.join(process.env.HOME || "/tmp", ".claude", "plans");
+      fs.mkdirSync(dir, { recursive: true });
+      const p = path.join(dir, "fake-plan.md");
+      fs.writeFileSync(p, "# plan\n");
       out({ type: "assistant", message: { content: [{ type: "tool_use", name: "Write", input: { file_path: p } }] } });
     }
     if (prompt.includes("FAIL_RUN")) {
